@@ -1,4 +1,4 @@
 4hexchat sparkles.c hexsparkles.c
-gcc -Wall -Os -DWIN32 -c hexsparkles.c
-dllwrap --def HexChat.def --dllname hexsparkles.dll hexsparkles.o
+gcc -c -o hexsparkles.o hexsparkles.c -std=gnu99
+gcc -o hexsparkles.dll -s -shared hexsparkles.o -Wl,--subsystem,windows
 pause

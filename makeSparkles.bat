@@ -1,3 +1,3 @@
-gcc -Wall -Os -DWIN32 -c sparkles.c
-dllwrap --def XChat.def --dllname sparkles.dll sparkles.o
+gcc -c -o sparkles.o sparkles.c -std=gnu99
+gcc -o sparkles.dll -s -shared sparkles.o -Wl,--subsystem,windows
 pause

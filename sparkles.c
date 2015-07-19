@@ -1,7 +1,7 @@
 ï»¿/*
  * Sparkles for XChat
  *
- * Copyright (C) 2011-2013 Princess Nova Storm the Squirrel
+ * Copyright (C) 2011-2015 Princess Nova Storm the Squirrel
  *
  * This program is free software: you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -21,7 +21,7 @@
 
 #define PNAME "Nova's Sparkles"
 #define PDESC "Mix of annoying/powerful/useful stuff"
-#define PVERSION "0.98+a"
+#define PVERSION "1.0"
 #define USE_SPARKLES_USER 0
 #define ENABLE_NSFW_CONTENT 1
 #define PESTERCHUM_NETWORK "Pesterchum"
@@ -33,6 +33,9 @@
 #include <stdlib.h>        // for strtol() and rand() mainly
 #include <time.h>          // so I can seed the randomizer with the current time
 #include <ctype.h>         // used in the capitalization functions
+#include <dirent.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -49,6 +52,7 @@ static int DisableAutoGhost=0;
 static int DisablePesterchum=0;
 static int DisablePrettyJanus=0;
 static int DisableSparklesCTCP = 0;
+static int ForceUTF8 = 0;
 static int AutoReclaimNick = 0;
 static char GhostReclaimNick[80]="";
 static int DisablePlusJFix = 0;
@@ -60,9 +64,13 @@ static char MeHookCommand[512]="";
 static int UseOneSayHook = 0;
 static xchat_hook *SayHook, *MeHook;
 static int EatHighlights = 0;
-static int MoveNotifyToServer=0;
-static int MoveServicesToServer=0;
+//static int MoveNotifyToServer=0;
+//static int MoveServicesToServer=0;
 static char ConfigFilePath[512]="";
+static char CustomYiffName[32] = "";
+static char *CustomYiffBuffer = NULL;
+static int CustomYiffCount = 0;
+static char *CustomYiffPointers[500];
 
 static unsigned int StartingTime = 0; // to help stop "oh my god I started xchat and it autoghosted stuff"
 static int GrabbingTopic = 0;
@@ -70,11 +78,11 @@ static char CommandPrefix[5] = "/"; // because this is able to be changed in XCh
 
 static char CmdStackText[512];
 static char *CmdStackPtr = NULL;
-//static int CmdStackLevel = 0;
 
 static int ContextStackSP = 0;
 static xchat_context *ContextStack[16];
 static int RandomType = 1;
+static int CharCounter = 0;
 
 static int DisableShowNetworkOnJoin=0;
 static int NeedSpaceBetweenX5Font = 0;
@@ -82,7 +90,7 @@ static char PesterchumChanHook[256] = "spark pestersay";
 static char PesterchumColor[64] = "0,0,0";
 
 static xchat_hook *SpawnHook[64] = {NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL};
-static char JanusLinkbots[32][8] = {"IotaIRC","IotaIRC_","","","","","",""};
+static char JanusLinkbots[4][32] = {"IotaIRC","IotaIRC_","",""};
 
 // 02 16 1f 16 16 0f 02 03 30 30 03 30 30
 static const char SparkEncryptPrefix[] = {2,0x16,0x1f,0x16,0x16,0x0f,2,3,'0','0',3,'0','0',0};
@@ -90,8 +98,92 @@ static char SparklesUser[64];
 
 static char *Rainbow[]={"04","08","09","12","13"};
 
-void INIConfigHandler(const char *Group, const char *Item, const char *Value);
-int ParseINI(FILE *File, void (*Handler)(const char *Group, const char *Item, const char *Value));
+static void INIConfigHandler(const char *Group, const char *Item, const char *Value);
+static int ParseINI(FILE *File, void (*Handler)(const char *Group, const char *Item, const char *Value));
+
+enum ConfigTypes {
+  CONFIG_STRING,
+  CONFIG_BOOLEAN,
+  CONFIG_INTEGER,
+};
+
+struct ConfigItem {
+  char *Group;
+  char *Item;
+  void *Data;
+  char Type;
+  short Len;
+} ConfigOptions[] = {
+  {"General", "RandomType", &RandomType, CONFIG_INTEGER, 0},
+  {"General", "TextEditor", &TextEditor, CONFIG_STRING, 512},
+  {"Automatic", "ForceUTF8", &ForceUTF8, CONFIG_BOOLEAN, 0},
+  {"Automatic", "CharCounter", &CharCounter, CONFIG_BOOLEAN, 0},
+  {"Automatic", "RejoinOnKick", &RejoinKick, CONFIG_BOOLEAN, 0},
+  {"Automatic", "JoinOnInvite", &JoinOnInvite, CONFIG_BOOLEAN, 0},
+  {"Automatic", "DisableAutoIdent", &DisableAutoIdent, CONFIG_BOOLEAN, 0},
+  {"Automatic", "DisableAutoNickColorReset", &DisableAutoNickDeblue, CONFIG_BOOLEAN, 0},
+  {"Automatic", "DisableAutoGhost", &DisableAutoGhost, CONFIG_BOOLEAN, 0},
+  {"Automatic", "Activity2Focus", &Activity2Focus, CONFIG_BOOLEAN, 0},
+  {"Automatic", "DisableNetworkSayer", &DisableShowNetworkOnJoin, CONFIG_BOOLEAN, 0},
+  {"Automatic", "DisableHighlights", &EatHighlights, CONFIG_BOOLEAN, 0},
+//  {"Automatic", "MoveNotifyToServerTab", &MoveNotifyToServer, CONFIG_BOOLEAN, 0},
+//  {"Automatic", "MoveServicesToServerTab", &MoveServicesToServer, CONFIG_BOOLEAN, 0},
+  {"PrettyJanus", "Disabled", &DisablePrettyJanus, CONFIG_BOOLEAN, 0},
+  {"PrettyJanus", "Nick0", JanusLinkbots[0], CONFIG_STRING, 32},
+  {"PrettyJanus", "Nick1", JanusLinkbots[1], CONFIG_STRING, 32},
+  {"PrettyJanus", "Nick2", JanusLinkbots[2], CONFIG_STRING, 32},
+  {"PrettyJanus", "Nick3", JanusLinkbots[3], CONFIG_STRING, 32},
+  {"Pesterchum", "Disabled", &DisablePesterchum, CONFIG_BOOLEAN, 0},
+  {"Pesterchum", "ChannelCommand", PesterchumChanHook, CONFIG_STRING, 512},
+  {"Pesterchum", "Color", PesterchumColor, CONFIG_STRING, 64},
+  {NULL}, // <-- end marker
+};
+
+static int isgraph2(char k) { // unicode version
+  if(!isgraph(k)) return 0;
+  unsigned char k2 = (unsigned char)k;
+  return k2<0x80||k2>0xbf;
+}
+
+static char *ReadTextFile(const char *Name) {
+  FILE *File = fopen(Name,"rb");
+  if(!File) return NULL;
+  fseek(File, 0, SEEK_END);
+  long FileSize = ftell(File);
+  rewind(File);
+  char *Buffer = (char*)malloc(sizeof(char)*FileSize+1);
+  if(Buffer == NULL) {
+    fclose(File);
+    return NULL;
+  }
+  if(FileSize != fread(Buffer,1,FileSize,File)) {
+    fclose(File);
+    return NULL;
+  }
+  fclose(File);
+  Buffer[FileSize] = 0;
+  return Buffer;
+}
+
+static void TextInterpolate(char *Out, const char *In, char Prefix, const char *ReplaceThis, const char *ReplaceWith[]) {
+  while(*In) {
+    if(*In != Prefix)
+      *(Out++) = *(In++);
+    else {
+      In++;
+      char *Find = strchr(ReplaceThis, *(In++));
+      if(Find) {
+        int This = Find - ReplaceThis;
+        strcpy(Out, ReplaceWith[This]);
+        Out += strlen(ReplaceWith[This]);
+      } else {
+        *(Out++) = Prefix;
+        *(Out++) = In[-1];
+      }
+    }
+  }
+  *Out = 0;
+}
 
 struct SpawnInfo {
   int Slot;
@@ -113,6 +205,83 @@ static int spawntimer_cb(void *userdata) {
   return 0;
 }
 
+static void UpdateCharCounter() {
+  if(!strlen(xchat_get_info(ph, "host")))
+    return;
+
+  int Len = strlen(xchat_get_info(ph, "inputbox"));
+  xchat_context *Context = xchat_get_context(ph);
+  int Id;
+  xchat_get_prefs(ph, "id", NULL, &Id);
+
+  xchat_list *list = xchat_list_get(ph, "channels");
+  if(list) {
+    while(xchat_list_next(ph, list)) {
+      if(xchat_list_int(ph, list, "type")==1 && xchat_list_int(ph, list, "id")==Id) { // server
+        if(xchat_set_context(ph,(xchat_context *)xchat_list_str(ph, list, "context"))) {
+          if(Len)
+            xchat_commandf(ph, "settab %-3i %s", Len, xchat_get_info(ph, "channel"));
+          else
+            xchat_commandf(ph, "settab %s", xchat_get_info(ph, "channel"));
+        }
+      }
+    }
+    xchat_list_free(ph, list);
+  }
+  xchat_set_context(ph, Context);
+}
+
+static int timer_cb(void *userdata) {
+  if(CharCounter)
+    UpdateCharCounter();
+  return 1;
+}
+
+static int charcounter_cb(char *word[], void *userdata) {
+  if(CharCounter)
+    UpdateCharCounter();
+  return XCHAT_EAT_NONE;
+}
+
+int MakeDirectory(const char *Path) {
+#ifdef _WIN32
+  return CreateDirectory(Path, NULL);
+#else
+  return !mkdir(Path, 0700);
+#endif
+}
+
+char *FindCloserPointer(char *A, char *B) {
+  if(!A) // doesn't matter if B is NULL too, it'll just return the NULL
+    return B;
+  if(!B || A < B)
+    return A;
+  return B;
+}
+
+int CreateDirectoriesForPath(const char *Folders) {
+  char Temp[strlen(Folders)+1];
+  strcpy(Temp, Folders);
+  struct stat st = {0};
+
+  char *Try = Temp;
+  if(Try[1] == ':' && Try[2] == '\\') // ignore drive names
+    Try = FindCloserPointer(strchr(Try+3, '/'), strchr(Try+3, '\\'));
+
+  while(Try) {
+    char Restore = *Try;
+    *Try = 0;
+    if(stat(Temp, &st) == -1) {
+      MakeDirectory(Temp);
+      if(stat(Temp, &st) == -1)
+        return 0;
+    }
+    *Try = Restore;
+    Try = FindCloserPointer(strchr(Try+1, '/'), strchr(Try+1, '\\'));
+  }
+  return 1;
+}
+
 static unsigned int MZXRand(unsigned long long range) {
    static unsigned long long seed = 0;
    unsigned long long value;
@@ -123,6 +292,7 @@ static unsigned int MZXRand(unsigned long long range) {
    value = (seed & 0xFFFFFFFF) * range / 0xFFFFFFFF;
    return (unsigned int)value;
 }
+
 static int RepeatRand(int Max) {
   Max = abs(Max);
   int Mask = 1;
@@ -139,6 +309,7 @@ static int RepeatRand(int Max) {
   }
   return Try;
 }
+
 static int rand2(int max) {
   if(max <= 0) return 0;
   switch(RandomType) {
@@ -176,20 +347,22 @@ static int MyNickCmp(char *N1, char *N2) {
    xchat_free(ph, StripName);
    return 0;
 }
+
 struct RandomReplaceList {
-  char In; int Amount; char Out[8];
+  char In; int Amount; char *Out[8];
 };
+
 struct RandomReplaceList AccentList[] = {
-  {'A',6,{'À','Á','Â','Ã','Ä','Å'}},
-  {'a',6,{'à','á','â','ã','ä','å'}},
-  {'E',6,{'È','É','Ê','Ë','E','E'}},
-  {'e',6,{'è','é','ê','ë','e','e'}},
-  {'O',6,{'Ò','Ó','Ô','Õ','Ö','Ø'}},
-  {'o',6,{'ò','ó','ô','õ','ö','ø'}},
-  {'U',4,{'Ù','Ú','Û','Ü'}},
-  {'u',4,{'ù','ú','û','ü'}},
-  {'I',4,{'Ì','Í','Î','Ï'}},
-  {'i',4,{'ì','í','î','ï'}},
+  {'A',6,{"Ã€","Ã","Ã‚","Ãƒ","Ã„","Ã…"}},
+  {'a',6,{"Ã ","Ã¡","Ã¢","Ã£","Ã¤","Ã¥"}},
+  {'E',4,{"Ãˆ","Ã‰","ÃŠ","Ã‹"}},
+  {'e',6,{"Ã¨","Ã©","Ãª","Ã«","e","e"}},
+  {'O',6,{"Ã’","Ã“","Ã”","Ã•","Ã–","Ã˜"}},
+  {'o',6,{"Ã²","Ã³","Ã´","Ãµ","Ã¶","Ã¸"}},
+  {'U',4,{"Ã™","Ãš","Ã›","Ãœ"}},
+  {'u',4,{"Ã¹","Ãº","Ã»","Ã¼"}},
+  {'I',4,{"ÃŒ","Ã","ÃŽ","Ã"}},
+  {'i',4,{"Ã¬","Ã­","Ã®","Ã¯"}},
   {0}
 };
 
@@ -197,26 +370,30 @@ static char *AccentFilter(char *Output, char *Input) {
   char *Poke = Output, *Peek = Input;
   while(*Peek) {
     char k = *(Peek++);
-    if(k == 'N') k = 'Ñ';
-    if(k == 'n') k = 'ñ';
-    if(k == 'S') k = 'Š';
-    if(k == 's') k = 'š';
-    if(k == 'Z') k = 'Ž';
-    if(k == 'y') k = 'ý';
-    if(k == 'Y') k = 'Ý';
-    if(k == 'D') k = 'Ð';
-    if(k == 'C') k = 'Ç';
-    if(k == 'c') k = 'ç';
-    if(k == 'B') k = 'ß';
+    char *Replacement = NULL;
+    if(k == 'N') Replacement = "Ã‘";
+    if(k == 'n') Replacement = "Ã±";
+    if(k == 'S') Replacement = "Å ";
+    if(k == 's') Replacement = "Å¡";
+    if(k == 'Z') Replacement = "Å½";
+    if(k == 'y') Replacement = "Ã½";
+    if(k == 'Y') Replacement = "Ã";
+    if(k == 'D') Replacement = "Ã";
+    if(k == 'C') Replacement = "Ã‡";
+    if(k == 'c') Replacement = "Ã§";
+    if(k == 'B') Replacement = "ÃŸ";
     int i;
-    *Poke = k;
     for(i=0;AccentList[i].In;i++)
       if(k==AccentList[i].In) {
         int j = rand2(AccentList[i].Amount);
-        *Poke = AccentList[i].Out[j];
+        Replacement = AccentList[i].Out[j];
         break;
       }
-    Poke++;
+    if(Replacement) {
+      strcpy(Poke, Replacement);
+      Poke += strlen(Replacement);
+    } else
+      *(Poke++) = k;
   }
   *Poke = 0;
   return Output;
@@ -225,6 +402,7 @@ static char *AccentFilter(char *Output, char *Input) {
 struct ReplaceList {
   char *In; char *Out; int Mode;
 };
+
 struct ReplaceList SellyList[] = {
   {"you", "u", 0}, {"your", "ur", 0}, {"you're", "ur", 0}, {"know", "kno", 0}, {"threw", "thru", 0}, {"through", "thru", 0},
   {"where", "where", 0}, {"there", "there", 0}, {"place", "plase", 0}, {"really", "reely", 0},
@@ -239,6 +417,7 @@ struct ReplaceList SellyList[] = {
   {"my", "mai", 1}, // gud
   {NULL, NULL, 0}
 };
+
 static char *SellyFilter(char *Output, char *Input, int Mode) {
   char *Poke = Output;
   char *Peek = Input;
@@ -408,7 +587,6 @@ static char *CustomReplace(char *Output, char *Input, char *List) {
   return Output;
 }
 
-
 static void ShuffleChars(char *Poke, char *Peek, int Swaps, int Flags) {
   strcpy(Poke,Peek);
   char *End = Poke + strlen(Poke);
@@ -489,7 +667,8 @@ static int AttributeLoop(char *Out, char *In, char *Loop) {
         break;
       case 'u': Out[o++]=0x1f; break;
       case 'b': Out[o++]=0x02; break;
-      case 'i': Out[o++]=0x16; break;
+      case 'i': Out[o++]=0x1d; break;
+      case 'R': Out[o++]=0x16; break;
       case 'p': Out[o++]=0x0f; break;
       case '_': Out[o++]=' '; break;
 
@@ -515,7 +694,7 @@ static int AttributeLoop(char *Out, char *In, char *Loop) {
       case '`':
         switch(Loop[s++]) {
           case '?':
-            while(!(isgraph(In[i]) || (In[i]==' ')) && i<EndI)
+            while(!(isgraph2(In[i]) || (In[i]==' ')) && i<EndI)
               Out[o++]=In[i++];
             break;
           case 'c':
@@ -861,7 +1040,6 @@ static char *TrollFilter(char *Output, char *Input, char *Troll) {
         Replace(" doublecross"," %%",0);
         Poke++; Peek++;
       }
-      // todo: make ool/loo sounds use 001/100
       break;
     case 14: // cg
       while(*Peek)
@@ -1114,7 +1292,7 @@ char *AcidText(char *NewString, char *Input) {
   if(strlen(Input) > 300) ColorFrequency = -1;
 
   for(Peek = StartHere;*Peek;Peek++) {
-    if(Peek == StartHere || (isgraph(*Peek) && (ColorFrequency!=-1) && ((rand()&ColorFrequency) == 0))) {
+    if(Peek == StartHere || (isgraph2(*Peek) && (ColorFrequency!=-1) && ((rand()&ColorFrequency) == 0))) {
       int Color1 = rand()&15;
       while(Color1 == 1 || Color1 == 14 || Color1 == 0)
         Color1 = rand()&15;
@@ -1149,7 +1327,8 @@ static char *sparkles_text_unescape(char *Poke, char *Peek) {
       Peek++;
       switch(*Peek) {
         case '\\': *(Poke-1) = '\\'; break; // Escaped '\'
-        case 'i': *(Poke-1)  = 0x16; break; // Reversed
+        case 'R': *(Poke-1)  = 0x16; break; // Reversed
+        case 'i': *(Poke-1)  = 0x1d; break; // Italic
         case '1': *(Poke-1)  = 0x01; break; // for making bots do actions
         case 'u': *(Poke-1)  = 0x1f; break; // Underline
         case 'b': *(Poke-1)  = 0x02; break; // Bold
@@ -1190,8 +1369,8 @@ static char *Adj(int Amount, char *Word, ...) {
 }
 
 // add to this list if you want, but be sure to update the number in SomeSpecies()
-static char *RandomSpecies[] = {"fox","wolf","kangaroo","raccoon","deer","skunk","hamster","dingo","coyote","kitty","squirrel","bunny","rabbit","dragon","canine","feline","vulpine","pony","lemming", NULL};
-static char *SomeSpecies(){return(RandomSpecies[rand2(19)]);}
+static char *RandomSpecies[] = {"fox","wolf","kangaroo","raccoon","deer","skunk","hamster","dingo","coyote","kitty","squirrel","bunny","rabbit","dragon","canine","feline","vulpine","pony","lemming","squirrel","otter","chakat","spacecat","sergal","porcupine","hedgehog","koala", NULL};
+static char *SomeSpecies(){return(RandomSpecies[rand2(27)]);}
 
 #if ENABLE_NSFW_CONTENT
 // * QNinja eyetwitches at the.... accuracy
@@ -1231,6 +1410,7 @@ static void GenDavYiff(char *CmdBuf, const char *Victim) {
     case 15: sprintf(CmdBuf, "%s sticks his finger in the cunt of %s", CmdBuf, Victim); break;
   }
 }
+
 static void DoDavYiff(char *Victim) {
   char Buffer[512]; int i;
   GenDavYiff(Buffer, Victim);
@@ -1253,12 +1433,10 @@ static int yiff_cb(char *word[], char *word_eol[], void *userdata) {
   if (!strcasecmp(word[2],"")) return(XCHAT_EAT_ALL);
 
   // alter the number if you add/take away yiffscript choices
-  int MaxYiffScript =43;
+  int MaxYiffScript = 44;
 
-  int assmunch = -1;
+  int action = -1;
   int BillyMaysMode = 0;
-  while(assmunch == LastYiff)
-    assmunch = rand()%MaxYiffScript;
 
    // fetch these however your IRC client does it
 //   const char *MyNick = xchat_get_info(ph,"nick");
@@ -1266,13 +1444,11 @@ static int yiff_cb(char *word[], char *word_eol[], void *userdata) {
 
   char CommandBuf[2048];  // I'm sick and tired of buffer overflow crashing my IRC bot,
   char ChainBuffer[2048]; // so I'll just raise the buffers to stupid sizes.
-  //sprintf(CommandBuf, "fails to find any YiffScript actions that match id %i", assmunch);
-  sprintf(CommandBuf, "fails to find any YiffScript actions that match id %i", assmunch);
+  sprintf(CommandBuf, "fails to find any YiffScript actions that match id %i", action);
   strcpy(ChainBuffer, "");
 
   char *MySpecies=SomeSpecies();
   char *YourSpecies=SomeSpecies();
-//  char *UsedBy="";	
   char *ReplyWith = "me";
 
   int YiffChain = 1;
@@ -1287,8 +1463,8 @@ static int yiff_cb(char *word[], char *word_eol[], void *userdata) {
 
   char *HSTroll = NULL;
   for(i=3;word[i]!=NULL && strcasecmp(word[i],"");i++) {
-      if(!strcasecmp(word[i],"-am")) // set assmunch
-        assmunch  = strtol(word[i+1],NULL,10);
+      if(!strcasecmp(word[i],"-am")) // set action
+        action  = strtol(word[i+1],NULL,10);
       if(!strcasecmp(word[i],"-ms")) // set my species
         MySpecies = word[i+1];
       if(!strcasecmp(word[i],"-ys")) // set your species
@@ -1306,15 +1482,37 @@ static int yiff_cb(char *word[], char *word_eol[], void *userdata) {
       if(!strcasecmp(word[i],"-davyiff")) {
         ActionSet = 2;}
       if(!strcasecmp(word[i],"-fuk")) {
-        ActionSet = 3; MaxYiffScript = 39;
-        if(!strcasecmp(Victim,"molsno")) Victim = "mol";
-        else if(!strcasecmp(Victim,"chuckles")) Victim = "chukl";
-        else if(!strcasecmp(Victim,"novasquirrel")) Victim = "nov";
-        else if(!strcasecmp(Victim,"nova")) Victim = "nov";
-        else if(!strcasecmp(Victim,"katrina")) Victim = "kayt";
-        else if(!strcasecmp(Victim,"dragonite")) Victim = "dwagonice";
-        else if(!strcasecmp(Victim,"ampharos")) Victim = "amfarce";
-        else if(!strcasecmp(Victim,"counterfeit")) Victim = "cow";
+        ActionSet = 3; MaxYiffScript = 40;
+      }
+      if(!strcasecmp(word[i],"-list")) {
+        ActionSet = 4;
+        // no exploits plz
+        if(strlen(word[i+1]) >= 30) return XCHAT_EAT_ALL;
+        if(strchr(word[i+1], '.'))  return XCHAT_EAT_ALL;
+        if(strchr(word[i+1], '/'))  return XCHAT_EAT_ALL;
+        if(strchr(word[i+1], '\\')) return XCHAT_EAT_ALL;
+        if(strcasecmp(word[i+1], CustomYiffName)) {
+          strcpy(CustomYiffName, word[i+1]);
+          if(CustomYiffBuffer) free(CustomYiffBuffer);
+          char Buffer[260];
+          sprintf(Buffer, "%s/Sparkles/yiff%s.txt", xchat_get_info(ph, "xchatdirfs"), word[i+1]);
+          CustomYiffBuffer = ReadTextFile(Buffer);
+          if(!CustomYiffBuffer) {
+            xchat_printf(ph, "Could not open %s\n", Buffer);
+            return XCHAT_EAT_ALL;
+          }
+          CustomYiffPointers[0] = CustomYiffBuffer;
+          CustomYiffCount = 1;
+          char *Poke = CustomYiffBuffer;
+          while(1) {
+            Poke = strchr(Poke+1, '\n');
+            if(!Poke) break;
+            if(Poke[-1] == '\r') Poke[-1] = 0;
+            *Poke = 0;
+            CustomYiffPointers[CustomYiffCount++] = Poke+1;
+          }
+        }
+        MaxYiffScript = CustomYiffCount;
       }
       if(!strcasecmp(word[i],"-rainbow"))
         Rainbows=1;
@@ -1326,14 +1524,14 @@ static int yiff_cb(char *word[], char *word_eol[], void *userdata) {
         Victim = word[i+1];
       if(!strcasecmp(word[i],"-bold"))
         strcat(ChainBuffer, "\2");
+      if(!strcasecmp(word[i],"-italic"))
+        strcat(ChainBuffer, "\x1d");
       if(!strcasecmp(word[i],"-underline"))
         strcat(ChainBuffer, "\x1f");
       if(!strcasecmp(word[i],"-inverse"))
         strcat(ChainBuffer, "\x16");
       if(!strcasecmp(word[i],"-prefix"))
         strcat(ChainBuffer, word[i+1]);
-      if(!strcasecmp(word[i],"-bserv")) // have BotServ yiff the person instead
-        ReplyWith = "bsdo"; // define bsdo as "bs act %c &2"
       if(!strcasecmp(word[i],"-say")) // use /say instead (so you can use cmdstack)
         ReplyWith = "say";
       if(!strcasecmp(word[i],"-shuffle"))
@@ -1343,125 +1541,131 @@ static int yiff_cb(char *word[], char *word_eol[], void *userdata) {
         // going too high crashes stuff with all the yiffiness so I'll cap it at 3
       }
    }
+  if(action == -1) {
+    do {
+      action = rand2(MaxYiffScript);
+    } while(action == LastYiff);
+  }
+  if(YiffChain != 1) Rainbows = 0;
+  const char *ReplaceWith[] = {xchat_get_info(ph, "nick"), Victim, MySpecies, YourSpecies, xchat_get_info(ph, "channel")};
 
-if(YiffChain != 1) Rainbows = 0;
-
-if(YiffChain == 0) sprintf(ChainBuffer, "throws a pizza party and invites %s", Victim); // ;3
-// -custaction "Action"
-for(;YiffChain;YiffChain--) { // really sloppy way of implementing yiffchains
-  if(ActionSet == 0) {
-    if (assmunch ==  0) sprintf(CommandBuf,"rubs %s's %s while groping at his crotch with his feet",Victim,Adj(3,"member","footpaws","knot"));
-    if (assmunch ==  1) sprintf(CommandBuf,"grabs %s, twirls him around like a dancer and places a kiss on his lips, fondling his tailhole for a second so he can taste it later ",Victim);
-    if (assmunch ==  2) sprintf(CommandBuf,"rubs %s's hard %s while reaching back for some extra tailhole fun",Victim,Adj(2,"knot","member"));
-    if (assmunch ==  3) sprintf(CommandBuf,"snuggletackles %s and starts romping on top of %s",Victim, Adj(2, "him","her"));
-    if (assmunch ==  4) sprintf(CommandBuf,"takes %s's %s %s into his maw and begins suckling like one would their mother's breast", Victim,Adj(8,"stiff","hard","long","tasty","thick","erect","throbbing","pulsing"),Adj(3,"rod","shaft","member"));
-    if (assmunch ==  5) sprintf(CommandBuf,"puts his fingers on %s's mouth to shush him as he starts working his %s %s%s",Victim,Adj(2,"throbbing","pulsing"),YourSpecies,Adj(4,"hood"," member"," penis"," rod"));
-    if (assmunch ==  6) sprintf(CommandBuf,"caresses %s's furry ballsac, inhaling %s's sweet musk through his nostrils, his %s starting to grow from all the sensations", Victim, Victim, Adj(2,"member","rod"));
-    if (assmunch ==  7) sprintf(CommandBuf,"murrs, humping softly against %s's hand, twisting the tip of his finger in %s's %s", Victim, Victim, Adj(3,"butthole","tailhole","tailstar"));
-    if (assmunch ==  8) sprintf(CommandBuf,"licks along %s's silky lips, taking %s's exposed %s%s and plays with the tip, rubbing the underside with his thumb slowly towards the tip", Victim, Victim, YourSpecies, Adj(3,"hood","hood"," member"));
-    if (assmunch ==  9) sprintf(CommandBuf,"gets a firm grip on %s's hip as he thrusts his %shood deep within his tight and inexperienced %s, unexpectedly ramming his knot causing an orgasm of pain and pleasure for %s",Victim,MySpecies,Adj(2,"tailhole","tailstar"),Victim);
-    if (assmunch == 10){sprintf(CommandBuf,"emerges from his sheathe, his hard knot glistening in the moist air"); YiffChain++; }
-    if (assmunch == 11) sprintf(CommandBuf,"pokes a finger into %s's %s sheath, tasting the tip of his finger in excitement", Victim,Adj(2,"moist","wet"));
-    if (assmunch == 12) sprintf(CommandBuf,"%s %s %s all over %s",Adj(4,"sprays","blasts","jets","squirts"),Adj(8,"hot","sticky","slick","warm","delicious","yummy","tasty","illegal"),Adj(4,"sperm","seed","cum","semen"),Victim);
-    if (assmunch == 13) sprintf(CommandBuf,"clenches his firm, supple buttocks around the %s head of %s's %s%s", Adj(4,"thick","hard","slick","wet"), Victim, YourSpecies, Adj(4,"cock","hood"," member", "dick"));
-    if (assmunch == 14) sprintf(CommandBuf,"runs his %s along %s's soft and slender thighs, running up to his %s %s%s ",Adj(2,"fingers","paws"), Victim, Adj(3,"thick and juicy","partially erect","hard, throbbing"), YourSpecies, Adj(4,"dick", "hood","cock"," member"));
-    if (assmunch == 15) sprintf(CommandBuf,"wraps his hands around %s's back, moving downward while kissing along his soft yet sturdy chest and abs",Victim);
-    if (assmunch == 16) sprintf(CommandBuf,"runs his %s through %s's silky fur, rubbing his %s to get him excited",Adj(2,"fingers","paws"),Victim,Adj(2,"dick","ear"));
-    if (assmunch == 17) sprintf(CommandBuf,"slips his tongue into %s's moist sheath, taking in all the flavors of his %s musk",Victim,YourSpecies);
-    if (assmunch == 18) sprintf(CommandBuf,"takes %s's entire %s length into his mouth, leaking precum in excitement",Victim, YourSpecies);
-    if (assmunch == 19) sprintf(CommandBuf,"cuddles close to %s, his excitement poking %s from behind",Victim,Victim);
-    if (assmunch == 20) sprintf(CommandBuf,"pushes down onto %s's lap with his weight, thrusting %s's knot deep within his %s",Victim,Victim, Adj(2,"tailstar","tailhole"));
-    if (assmunch == 21) sprintf(CommandBuf,"rubs his petite bottom on %s's well-endowed %s-cock",word[2],YourSpecies);
-    if (assmunch == 22) sprintf(CommandBuf,"murrs as he slides his paw over %s's %s %s %s",Victim, Adj(9,"throbbing","huge","gigantic","enormous","freaking huge", "ridiculously sized", "illegally sized","massive","itty bitty"), YourSpecies,Adj(4,"cock","penis","length","member"));
-    if (assmunch == 23) sprintf(CommandBuf,"pushes down on %s's rock hard %s%s with his palm, sliding around with his precum", Victim, YourSpecies,Adj(4,"cock","hood"," member"," rod"));
-    if (assmunch == 24) sprintf(CommandBuf, "takes %s's entire %s length into his mouth, gagging as he swallows the knot", Victim, YourSpecies);
-//if (assmunch == 24) sprintf(CommandBuf,"twirls around %s's long %s-neck, planting a kiss on his big %s mouth",Victim,YourSpecies,Adj(4,"stupid","loud","slimy","sticky"));
-    if (assmunch == 25) sprintf(CommandBuf,"slides %s fingers into %s's %s %s while fondling hir sheathe",Adj(4,"two","three","four","over 9000"),Victim,Adj(4,"juicy","tight","erect","wet"),Adj(3,"pussy","vagina","cunt"));
-    if (assmunch == 26) sprintf(CommandBuf,"tries to go down on %s's sweet %s-gina, but is pushed back by hir throbbing %s",Victim,YourSpecies,Adj(2,"member","rod"));
-    if (assmunch == 27) sprintf(CommandBuf,"takes a painfully hard grip on %s's %s%s from behind and %s his knot right up %s %s %s", Victim, YourSpecies, Adj(3,"hood","cock"," member"), Adj(5,"jams","forces","shoves","pushes","slams"), Adj(3,"his","her","hir"), Adj(2,"virgin","tight"), Adj(2,"tailhole","tailstar"));
-    if (assmunch == 28) sprintf(CommandBuf,"slides his throbbing %s%s along %s's luscious %s breasts, leaving a trail of precum along %s sweat-glistened chest", MySpecies, Adj(3,"hood","cock"," member"), Victim, YourSpecies, Adj(3,"her","his","hir"));
-    if (assmunch == 29) sprintf(CommandBuf,"puts %s muzzle between %s's smooth thighs and starts lapping at %s %s %sclit", Adj(3,"her","his","hir"), Victim, Adj(2,"her","hir"), Adj(3,"slippery","sensitive","erect"), YourSpecies);
-    if (assmunch == 30) sprintf(CommandBuf,"gently slides his paw over %s's right foot while gliding a finger over his tailhole in anticipation",Victim);
-    if (assmunch == 31){sprintf(CommandBuf,"drags a foxy claw across the ridges of %s's circumcision scar",Victim); YiffChain++; }
-    if (assmunch == 32) sprintf(CommandBuf,"%s a huge creamy yiffload all over %s", Adj(4,"busts","blasts","shoots","jets"), Victim);
-    if (assmunch == 33) sprintf(CommandBuf,"takes %s and ravages them from behind with a huge %s boner.",word[2],MySpecies);
-    if (assmunch == 34) sprintf(CommandBuf,"aims and shoots, but misses %s's mouth, leaving a mess of jizz dripping down %s's chin!",Victim,Victim);
-    if (assmunch == 35) sprintf(CommandBuf,"%s gallons of %s jizz all over %s", Adj(2,"blasts","pumps"), MySpecies, word[2]);
-    if (assmunch == 36) sprintf(CommandBuf,"howls with pleasure as %s pulls his knot out of his hole, stretching it to an obscene size before a loud \"POP\" is heard and %s's %sjuice cascades down his already drenched thighs",word[2],Victim,YourSpecies);
-    if (assmunch == 37) sprintf(CommandBuf,"nibbles softly on the carrot protruding from %s's juicy hole as %s's fluffy bunnytail tickles %s face",Victim,Victim, Adj(3,"his","her", "hir"));
-    if (assmunch == 39) sprintf(CommandBuf,"tailwavies~ at %s, showing him his engorged, dripping %s%s",Victim, MySpecies, Adj(3,"hood","cock"," member"));
-    if (assmunch == 40) sprintf(CommandBuf,"critches the inside of %s's rosebud with his entire hand while lapping up the fountain of %s butter escaping from %s's engorged member",Victim,YourSpecies,Victim);
-    if (assmunch == 41) sprintf(CommandBuf,"rubs his paws through %s's %sfuzz, sticking his muzzle under the %s's tail giving %s %s a nice warm lick", Victim, Adj(3,"butt","butt","ass"), YourSpecies, Adj(2,"his","her"), Adj(2,"tailstar","tailhole"));
-    if (assmunch == 42) sprintf(CommandBuf,"goes apeshit and jumps on %s with a pulsing hard cock",Victim);
-    if (assmunch == 43) sprintf(CommandBuf,"grabs %s and kisses %s on the lips deeply, slowly starting to make out with the %s", Victim, Adj(2,"him","her"), YourSpecies);
-    if (assmunch == 80) sprintf(CommandBuf,"mounts %s and thrusts his %s %s cock deeply in his tight ass, ramming his bulging knot deeper with each pump, his balls smacking against the %s's ass while his already engorged member squirts pre all in %s", Victim, Adj(2,"throbbing","pulsing"), MySpecies, YourSpecies, Victim);
-  }
-  if(ActionSet == 1) {
-    if (assmunch ==  0) sprintf(CommandBuf,"looks at %s, charges to them, jumps and snuggles!", Victim);
-    if (assmunch ==  1) sprintf(CommandBuf,"appears behind %s and wraps his arms around %s's midsection playfully!", Victim,Victim);
-    if (assmunch ==  2) sprintf(CommandBuf,"glomps %s, nuzzling him!", Victim);
-    if (assmunch ==  3) sprintf(CommandBuf,"hugs %s tightly, enjoying his warmth", Victim);
-    if (assmunch ==  4) sprintf(CommandBuf,"tackles %s to the ground in a hug, nuzzling him~", Victim);
-    if (assmunch ==  5) sprintf(CommandBuf,"snuggles with %s, murring~", Victim);
-    if (assmunch ==  6) sprintf(CommandBuf,"hugs %s, giving them a small kiss on the cheek", Victim);
-    if (assmunch ==  7) sprintf(CommandBuf,"tacklesnugs %s!!", Victim);
-    if (assmunch ==  8) sprintf(CommandBuf,"nuzzles %s, murring and smiling~", Victim);
-    if (assmunch ==  9) sprintf(CommandBuf,"playfully tickles %s, huggling them afterwards~", Victim);
-  }
-  if(ActionSet == 2) {
-    GenDavYiff(CommandBuf, Victim);
-  }
-  if(ActionSet == 3) {
-    if (assmunch ==  0) sprintf(CommandBuf,"toch %s inapritly", Victim);
-    if (assmunch ==  1) sprintf(CommandBuf,"lok at %s but!", Victim);
-    if (assmunch ==  2) sprintf(CommandBuf,"chukl @ %s", Victim);
-    if (assmunch ==  3) sprintf(CommandBuf,"sap %s on the but", Victim);
-    if (assmunch ==  4) sprintf(CommandBuf,"get nakd 4 %s 2 wach", Victim);
-    if (assmunch ==  5) sprintf(CommandBuf,"laf @ %s's smal dik! lol!", Victim);
-    if (assmunch ==  6) sprintf(CommandBuf,"suk %s dik! omg big!", Victim);
-    if (assmunch ==  7) sprintf(CommandBuf,"lik her bobs & let %s watch!!!!!!", Victim);
-    if (assmunch ==  8) sprintf(CommandBuf,"msg her pus & com al ovr %s! sary!!!", Victim);
-    if (assmunch ==  9) sprintf(CommandBuf,"kis %s width pashin", Victim);
-    if (assmunch == 10) sprintf(CommandBuf,"rub %s dik til it skwart! yam!", Victim);
-    if (assmunch == 11) sprintf(CommandBuf,"cal %s a jek!", Victim);
-    if (assmunch == 12) sprintf(CommandBuf,"finghersef ten shuv figner up %s but!", Victim);
-    if (assmunch == 13) sprintf(CommandBuf,"frat on %s dik", Victim);
-    if (assmunch == 14) sprintf(CommandBuf,"jugl %s bals", Victim);
-    if (assmunch == 15) sprintf(CommandBuf,"chap %s hed of", Victim);
-    if (assmunch == 16) sprintf(CommandBuf,"cal %s a uqly nager! stop swimin!", Victim);
-    if (assmunch == 17) sprintf(CommandBuf,"pok %s jus 4 fun :D!", Victim);
-    if (assmunch == 18) sprintf(CommandBuf,"tak cloths off & let %s tak pics", Victim);
-    if (assmunch == 19) sprintf(CommandBuf,"get nakd & clim in2 %s's bed & suck %s dik undie teh covars", Victim, Victim);
-    if (assmunch == 20) sprintf(CommandBuf,"pop in %s tolet. it stink new!", Victim);
-    if (assmunch == 21) sprintf(CommandBuf,"tint %s by slap hre but", Victim);
-    if (assmunch == 22) sprintf(CommandBuf,"let %s stik his dik in witey puss. omg ur so bag!", Victim);
-    if (assmunch == 23) sprintf(CommandBuf,"por iskreem don %s pant", Victim);
-    if (assmunch == 24) sprintf(CommandBuf,"sit on %s dik & jigel her bobs", Victim);
-    if (assmunch == 25) sprintf(CommandBuf,"pop out of %s clost & shov %s dik up her but SUPRIS BUTSEKS", Victim, Victim);
-    if (assmunch == 26) sprintf(CommandBuf,"takl & hug %s", Victim);
-    if (assmunch == 27) sprintf(CommandBuf,"stik dik in %s boootie! wowh dat tite!", Victim);
-    if (assmunch == 28) sprintf(CommandBuf,"ripe %s in shawer", Victim);
-    if (assmunch == 29) sprintf(CommandBuf,"smak %s tity arond&rond", Victim);
-    if (assmunch == 30) sprintf(CommandBuf,"pul %s nepal tal melk cum out then i dranc melk! yum!", Victim);
-    if (assmunch == 31) sprintf(CommandBuf,"rip of %s close so %s nood wow %s youre prity..prity UGLY lol!!!!!", Victim, Victim, Victim);
-    if (assmunch == 32) sprintf(CommandBuf,"com in %s then pul out & lik joos. wowh test lek apl!", Victim);
-    if (assmunch == 33) sprintf(CommandBuf,"salp %s in fayc wit dik & P in aye, wops!", Victim);
-    if (assmunch == 34) sprintf(CommandBuf,"skwart don %s throught. r u stil thurst?", Victim);
-    if (assmunch == 35) sprintf(CommandBuf,"sho of dik 2 %s! dont laff @ me u jek!!!", Victim);
-    if (assmunch == 36) sprintf(CommandBuf,"dra pic of hishelf on %s bely wit prekom", Victim);
-    if (assmunch == 37) sprintf(CommandBuf,"dres dik up in tophat & shuv it up %s puss", Victim);
-    if (assmunch == 38) sprintf(CommandBuf,"rip of %s nepals & glu on hes bals", Victim);
-    if (assmunch == 39) sprintf(CommandBuf,"stik dik in %s ear & P! hehahe u got swimer year!", Victim);
-  }
-  if(NULL != strstr(CommandBuf,"fails to")) {
-    YiffChain++;
-    assmunch = rand2(MaxYiffScript); // pick a new yiff action
-    continue;
-  }
-  else {
-    strcat(ChainBuffer, CommandBuf);
-    if(YiffChain != 1) strcat(ChainBuffer, Conjoin); // "and after that"
-  }
+  if(YiffChain == 0) sprintf(ChainBuffer, "throws a pizza party and invites %s", Victim);
+  for(;YiffChain;YiffChain--) { // really sloppy way of implementing yiffchains
+    if(ActionSet == 0) {
+      if (action ==  0) sprintf(CommandBuf,"rubs %s's %s while groping at his crotch with his feet",Victim,Adj(3,"member","footpaws","knot"));
+      if (action ==  1) sprintf(CommandBuf,"grabs %s, twirls him around like a dancer and places a kiss on his lips, fondling his tailhole for a second so he can taste it later ",Victim);
+      if (action ==  2) sprintf(CommandBuf,"rubs %s's hard %s while reaching back for some extra tailhole fun",Victim,Adj(2,"knot","member"));
+      if (action ==  3) sprintf(CommandBuf,"snuggletackles %s and starts romping on top of %s",Victim, Adj(2, "him","her"));
+      if (action ==  4) sprintf(CommandBuf,"takes %s's %s %s into his maw and begins suckling like one would their mother's breast", Victim,Adj(8,"stiff","hard","long","tasty","thick","erect","throbbing","pulsing"),Adj(3,"rod","shaft","member"));
+      if (action ==  5) sprintf(CommandBuf,"puts his fingers on %s's mouth to shush him as he starts working his %s %s%s",Victim,Adj(2,"throbbing","pulsing"),YourSpecies,Adj(4,"hood"," member"," penis"," rod"));
+      if (action ==  6) sprintf(CommandBuf,"caresses %s's furry ballsac, inhaling %s's sweet musk through his nostrils, his %s starting to grow from all the sensations", Victim, Victim, Adj(2,"member","rod"));
+      if (action ==  7) sprintf(CommandBuf,"murrs, humping softly against %s's hand, twisting the tip of his finger in %s's %s", Victim, Victim, Adj(3,"butthole","tailhole","tailstar"));
+      if (action ==  8) sprintf(CommandBuf,"licks along %s's silky lips, taking %s's exposed %s%s and plays with the tip, rubbing the underside with his thumb slowly towards the tip", Victim, Victim, YourSpecies, Adj(3,"hood","hood"," member"));
+      if (action ==  9) sprintf(CommandBuf,"gets a firm grip on %s's hip as he thrusts his %shood deep within his tight and inexperienced %s, unexpectedly ramming his knot causing an orgasm of pain and pleasure for %s",Victim,MySpecies,Adj(2,"tailhole","tailstar"),Victim);
+      if (action == 10){sprintf(CommandBuf,"emerges from his sheathe, his hard knot glistening in the moist air"); YiffChain++; }
+      if (action == 11) sprintf(CommandBuf,"pokes a finger into %s's %s sheath, tasting the tip of his finger in excitement", Victim,Adj(2,"moist","wet"));
+      if (action == 12) sprintf(CommandBuf,"%s %s %s all over %s",Adj(4,"sprays","blasts","jets","squirts"),Adj(8,"hot","sticky","slick","warm","delicious","yummy","tasty","illegal"),Adj(4,"sperm","seed","cum","semen"),Victim);
+      if (action == 13) sprintf(CommandBuf,"clenches his firm, supple buttocks around the %s head of %s's %s%s", Adj(4,"thick","hard","slick","wet"), Victim, YourSpecies, Adj(4,"cock","hood"," member", "dick"));
+      if (action == 14) sprintf(CommandBuf,"runs his %s along %s's soft and slender thighs, running up to his %s %s%s ",Adj(2,"fingers","paws"), Victim, Adj(3,"thick and juicy","partially erect","hard, throbbing"), YourSpecies, Adj(4,"dick", "hood","cock"," member"));
+      if (action == 15) sprintf(CommandBuf,"wraps his hands around %s's back, moving downward while kissing along his soft yet sturdy chest and abs",Victim);
+      if (action == 16) sprintf(CommandBuf,"runs his %s through %s's silky fur, rubbing his %s to get him excited",Adj(2,"fingers","paws"),Victim,Adj(2,"dick","ear"));
+      if (action == 17) sprintf(CommandBuf,"slips his tongue into %s's moist sheath, taking in all the flavors of his %s musk",Victim,YourSpecies);
+      if (action == 18) sprintf(CommandBuf,"takes %s's entire %s length into his mouth, leaking precum in excitement",Victim, YourSpecies);
+      if (action == 19) sprintf(CommandBuf,"cuddles close to %s, his excitement poking %s from behind",Victim,Victim);
+      if (action == 20) sprintf(CommandBuf,"pushes down onto %s's lap with his weight, thrusting %s's knot deep within his %s",Victim,Victim, Adj(2,"tailstar","tailhole"));
+      if (action == 21) sprintf(CommandBuf,"rubs his petite bottom on %s's well-endowed %s-cock",word[2],YourSpecies);
+      if (action == 22) sprintf(CommandBuf,"murrs as he slides his paw over %s's %s %s %s",Victim, Adj(9,"throbbing","huge","gigantic","enormous","freaking huge", "ridiculously sized", "illegally sized","massive","itty bitty"), YourSpecies,Adj(4,"cock","penis","length","member"));
+      if (action == 23) sprintf(CommandBuf,"pushes down on %s's rock hard %s%s with his palm, sliding around with his precum", Victim, YourSpecies,Adj(4,"cock","hood"," member"," rod"));
+      if (action == 24) sprintf(CommandBuf,"takes %s's entire %s length into his mouth, gagging as he swallows the knot", Victim, YourSpecies);
+      if (action == 25) sprintf(CommandBuf,"slides %s fingers into %s's %s %s while fondling hir sheathe",Adj(4,"two","three","four","over 9000"),Victim,Adj(4,"juicy","tight","erect","wet"),Adj(3,"pussy","vagina","cunt"));
+      if (action == 26) sprintf(CommandBuf,"tries to go down on %s's sweet %s-gina, but is pushed back by hir throbbing %s",Victim,YourSpecies,Adj(2,"member","rod"));
+      if (action == 27) sprintf(CommandBuf,"takes a painfully hard grip on %s's %s%s from behind and %s his knot right up %s %s %s", Victim, YourSpecies, Adj(3,"hood","cock"," member"), Adj(5,"jams","forces","shoves","pushes","slams"), Adj(3,"his","her","hir"), Adj(2,"virgin","tight"), Adj(2,"tailhole","tailstar"));
+      if (action == 28) sprintf(CommandBuf,"slides his throbbing %s%s along %s's luscious %s breasts, leaving a trail of precum along %s sweat-glistened chest", MySpecies, Adj(3,"hood","cock"," member"), Victim, YourSpecies, Adj(3,"her","his","hir"));
+      if (action == 29) sprintf(CommandBuf,"puts %s muzzle between %s's smooth thighs and starts lapping at %s %s %sclit", Adj(3,"her","his","hir"), Victim, Adj(2,"her","hir"), Adj(3,"slippery","sensitive","erect"), YourSpecies);
+      if (action == 30) sprintf(CommandBuf,"gently slides his paw over %s's right foot while gliding a finger over his tailhole in anticipation",Victim);
+      if (action == 31){sprintf(CommandBuf,"drags a foxy claw across the ridges of %s's circumcision scar",Victim); YiffChain++; }
+      if (action == 32) sprintf(CommandBuf,"%s a huge creamy yiffload all over %s", Adj(4,"busts","blasts","shoots","jets"), Victim);
+      if (action == 33) sprintf(CommandBuf,"takes %s and ravages them from behind with a huge %s boner.",word[2],MySpecies);
+      if (action == 34) sprintf(CommandBuf,"aims and shoots, but misses %s's mouth, leaving a mess of jizz dripping down %s's chin!",Victim,Victim);
+      if (action == 35) sprintf(CommandBuf,"%s gallons of %s jizz all over %s", Adj(2,"blasts","pumps"), MySpecies, word[2]);
+      if (action == 36) sprintf(CommandBuf,"howls with pleasure as %s pulls his knot out of his hole, stretching it to an obscene size before a loud \"POP\" is heard and %s's %sjuice cascades down his already drenched thighs",word[2],Victim,YourSpecies);
+      if (action == 37) sprintf(CommandBuf,"nibbles softly on the carrot protruding from %s's juicy hole as %s's fluffy bunnytail tickles %s face",Victim,Victim, Adj(3,"his","her", "hir"));
+      if (action == 39) sprintf(CommandBuf,"tailwavies~ at %s, showing him his engorged, dripping %s%s",Victim, MySpecies, Adj(3,"hood","cock"," member"));
+      if (action == 40) sprintf(CommandBuf,"critches the inside of %s's rosebud with his entire hand while lapping up the fountain of %s butter escaping from %s's engorged member",Victim,YourSpecies,Victim);
+      if (action == 41) sprintf(CommandBuf,"rubs his paws through %s's %sfuzz, sticking his muzzle under the %s's tail giving %s %s a nice warm lick", Victim, Adj(3,"butt","butt","ass"), YourSpecies, Adj(2,"his","her"), Adj(2,"tailstar","tailhole"));
+      if (action == 42) sprintf(CommandBuf,"goes apeshit and jumps on %s with a pulsing hard cock",Victim);
+      if (action == 43) sprintf(CommandBuf,"grabs %s and kisses %s on the lips deeply, slowly starting to make out with the %s", Victim, Adj(2,"him","her"), YourSpecies);
+    }
+    if(ActionSet == 1) {
+      if (action ==  0) sprintf(CommandBuf,"looks at %s, charges to them, jumps and snuggles!", Victim);
+      if (action ==  1) sprintf(CommandBuf,"appears behind %s and wraps his arms around %s's midsection playfully!", Victim,Victim);
+      if (action ==  2) sprintf(CommandBuf,"glomps %s, nuzzling him!", Victim);
+      if (action ==  3) sprintf(CommandBuf,"hugs %s tightly, enjoying his warmth", Victim);
+      if (action ==  4) sprintf(CommandBuf,"tackles %s to the ground in a hug, nuzzling him~", Victim);
+      if (action ==  5) sprintf(CommandBuf,"snuggles with %s, murring~", Victim);
+      if (action ==  6) sprintf(CommandBuf,"hugs %s, giving them a small kiss on the cheek", Victim);
+      if (action ==  7) sprintf(CommandBuf,"tacklesnugs %s!!", Victim);
+      if (action ==  8) sprintf(CommandBuf,"nuzzles %s, murring and smiling~", Victim);
+      if (action ==  9) sprintf(CommandBuf,"playfully tickles %s, huggling them afterwards~", Victim);
+    }
+    if(ActionSet == 2) {
+      GenDavYiff(CommandBuf, Victim);
+    }
+    if(ActionSet == 3) {
+      if (action ==  0) sprintf(CommandBuf,"toch %s inapritly", Victim);
+      if (action ==  1) sprintf(CommandBuf,"lok at %s but!", Victim);
+      if (action ==  2) sprintf(CommandBuf,"chukl @ %s", Victim);
+      if (action ==  3) sprintf(CommandBuf,"sap %s on the but", Victim);
+      if (action ==  4) sprintf(CommandBuf,"get nakd 4 %s 2 wach", Victim);
+      if (action ==  5) sprintf(CommandBuf,"laf @ %s's smal dik! lol!", Victim);
+      if (action ==  6) sprintf(CommandBuf,"suk %s dik! omg big!", Victim);
+      if (action ==  7) sprintf(CommandBuf,"lik her bobs & let %s watch!!!!!!", Victim);
+      if (action ==  8) sprintf(CommandBuf,"msg her pus & com al ovr %s! sary!!!", Victim);
+      if (action ==  9) sprintf(CommandBuf,"kis %s width pashin", Victim);
+      if (action == 10) sprintf(CommandBuf,"rub %s dik til it skwart! yam!", Victim);
+      if (action == 11) sprintf(CommandBuf,"cal %s a jek!", Victim);
+      if (action == 12) sprintf(CommandBuf,"finghersef ten shuv figner up %s but!", Victim);
+      if (action == 13) sprintf(CommandBuf,"frat on %s dik", Victim);
+      if (action == 14) sprintf(CommandBuf,"jugl %s bals", Victim);
+      if (action == 15) sprintf(CommandBuf,"chap %s hed of", Victim);
+      if (action == 16) sprintf(CommandBuf,"cal %s a uqly nager! stop swimin!", Victim);
+      if (action == 17) sprintf(CommandBuf,"pok %s jus 4 fun :D!", Victim);
+      if (action == 18) sprintf(CommandBuf,"tak cloths off & let %s tak pics", Victim);
+      if (action == 19) sprintf(CommandBuf,"get nakd & clim in2 %s's bed & suck %s dik undie teh covars", Victim, Victim);
+      if (action == 20) sprintf(CommandBuf,"pop in %s tolet. it stink new!", Victim);
+      if (action == 21) sprintf(CommandBuf,"tint %s by slap hre but", Victim);
+      if (action == 22) sprintf(CommandBuf,"let %s stik his dik in witey puss. omg ur so bag!", Victim);
+      if (action == 23) sprintf(CommandBuf,"por iskreem don %s pant", Victim);
+      if (action == 24) sprintf(CommandBuf,"sit on %s dik & jigel her bobs", Victim);
+      if (action == 25) sprintf(CommandBuf,"pop out of %s clost & shov %s dik up her but SUPRIS BUTSEKS", Victim, Victim);
+      if (action == 26) sprintf(CommandBuf,"takl & hug %s", Victim);
+      if (action == 27) sprintf(CommandBuf,"stik dik in %s boootie! wowh dat tite!", Victim);
+      if (action == 28) sprintf(CommandBuf,"ripe %s in shawer", Victim);
+      if (action == 29) sprintf(CommandBuf,"smak %s tity arond&rond", Victim);
+      if (action == 30) sprintf(CommandBuf,"pul %s nepal tal melk cum out then i dranc melk! yum!", Victim);
+      if (action == 31) sprintf(CommandBuf,"rip of %s close so %s nood wow %s youre prity..prity UGLY lol!!!!!", Victim, Victim, Victim);
+      if (action == 32) sprintf(CommandBuf,"com in %s then pul out & lik joos. wowh test lek apl!", Victim);
+      if (action == 33) sprintf(CommandBuf,"salp %s in fayc wit dik & P in aye, wops!", Victim);
+      if (action == 34) sprintf(CommandBuf,"skwart don %s throught. r u stil thurst?", Victim);
+      if (action == 35) sprintf(CommandBuf,"sho of dik 2 %s! dont laff @ me u jek!!!", Victim);
+      if (action == 36) sprintf(CommandBuf,"dra pic of hishelf on %s bely wit prekom", Victim);
+      if (action == 37) sprintf(CommandBuf,"dres dik up in tophat & shuv it up %s puss", Victim);
+      if (action == 38) sprintf(CommandBuf,"rip of %s nepals & glu on hes bals", Victim);
+      if (action == 39) sprintf(CommandBuf,"stik dik in %s ear & P! hehahe u got swimer year!", Victim);
+    }
+    if(ActionSet == 4) {
+      *CommandBuf = 0; // probably don't need this
+      TextInterpolate(CommandBuf, CustomYiffPointers[action], '%', "mysSc", ReplaceWith);
+    }
+    if(NULL != strstr(CommandBuf,"fails to")) {
+      YiffChain++;
+      action = rand2(MaxYiffScript); // pick a new yiff action
+      continue;
+    }
+    else {
+      strcat(ChainBuffer, CommandBuf);
+      if(YiffChain != 1) strcat(ChainBuffer, Conjoin); // "and after that"
+    }
 /*
 <NovaYoshi> Note the "and then"
 <Kyurel> "and then"
@@ -1473,8 +1677,8 @@ for(;YiffChain;YiffChain--) { // really sloppy way of implementing yiffchains
 <Kyurel> maybe
 <Kyurel> "next... then... thenceforth... finally..."
 */
-   assmunch = rand2(MaxYiffScript); // pick a new yiff action
-}
+     action = rand2(MaxYiffScript); // pick a new yiff action
+  }
    sprintf(CommandBuf, "%s %s", ChainBuffer, Emoticon); // append a smiley
 
    if(BillyMaysMode==1 || !strcasecmp(Victim,"Billy Mays") || !strcasecmp(Victim,"BillyMays")) {
@@ -1499,7 +1703,7 @@ for(;YiffChain;YiffChain--) { // really sloppy way of implementing yiffchains
      int j;
      char *Poke = ChainBuffer;
      for(i=0,j=0;CommandBuf[i];i++) {
-       if(isgraph(CommandBuf[i]) && !(i&3)) {
+       if(isgraph2(CommandBuf[i]) && !(i&3)) {
          *(Poke++) = 0x03;
          *(Poke++) = Rainbow[j][0];
          *(Poke++) = Rainbow[j++][1];
@@ -1511,7 +1715,7 @@ for(;YiffChain;YiffChain--) { // really sloppy way of implementing yiffchains
      strcpy(CommandBuf,ChainBuffer);
    }
 
-   LastYiff=assmunch;
+   LastYiff=action;
  
    if(ShuffleLevel > 0) {
      ShuffleChars(ChainBuffer, CommandBuf,  ShuffleLevel,0);
@@ -1533,6 +1737,7 @@ static int Activity2Focus_cb(char *word[], void *userdata) {
     xchat_command(ph,"gui focus");
   return XCHAT_EAT_NONE;
 }
+
 static int RawServer_cb(char *word[], char *word_eol[], void *userdata) {
   if(GrabbingTopic) {
     if(!strcasecmp(word[2],"332")) {
@@ -1595,6 +1800,10 @@ static char *Backwords(const char *Inp, char *Out) {
 static int WhatNetwork_cb(char *word[], void *userdata) {
 // Just in case filenames get damaged, I can still see from my logs what network they're from
   if(DisableShowNetworkOnJoin) return XCHAT_EAT_NONE;
+  if(ForceUTF8) {
+    if(strcasecmp(xchat_get_info(ph, "charset"), "UTF-8") && strcasecmp(xchat_get_info(ph, "charset"), "UTF8"))
+      xchat_command(ph, "charset UTF-8");
+  }
   xchat_printf(ph,"( Network is \"%s\" , \"%s\" )\n", //SparklesUser,
         SafeGet(xchat_get_info(ph, "network"),"Not found"),
         SafeGet(xchat_get_info(ph, "server"),NULL));
@@ -1674,7 +1883,6 @@ static int TrapNormalPost_cb(char *word[], char *word_eol[], void *userdata) {
   }
   return XCHAT_EAT_NONE;
 }
-// :snowleopard.anthrochat.net 322 NovaYoshi #purrfection 11 :[+ntr]
 static int AsyncExec(char *Command) {
 //shamelessy taken from hexchat's exec plugin
 #ifdef _WIN32
@@ -1704,15 +1912,34 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
         xchat_commandf(ph,"%s", Buffer);
       }
    }
-   if(!strcasecmp(word[2],"brokecp")) { // intended to get around a Silverex bug.
-      if(word[3] != NULL) {             // obsolete because I use XChat-WDK now.
-		FILE *Broke = fopen("C:\\dodongo\\broke.txt","a"); // change for your situation
-        if(Broke != NULL) {
-          fprintf(Broke, "%s\n",word_eol[3]);
-          fclose(Broke);
-          xchat_commandf(ph,"exec C:\\dodongo\\brokens.bat"); // also this
- 		}
-      }
+
+   if(!strcasecmp(word[2],"saveprefs")) { // save preferences back to the ini
+     CreateDirectoriesForPath(ConfigFilePath);
+     FILE *Output = fopen(ConfigFilePath,"w");
+     if(!Output) {
+       xchat_print(ph, "Can't open preferences file for writing\n");
+       return XCHAT_EAT_ALL;
+     }
+     int i;
+     const char *LastGroup = "";
+     for(i=0;ConfigOptions[i].Group;i++) {
+       if(strcmp(LastGroup, ConfigOptions[i].Group)) {
+         if(*LastGroup)
+           fprintf(Output, "\n");
+         fprintf(Output, "[%s]\n", ConfigOptions[i].Group);
+       }
+       LastGroup = ConfigOptions[i].Group;
+
+       if(ConfigOptions[i].Type == CONFIG_STRING) {
+         fprintf(Output, "%s=%s\n", ConfigOptions[i].Item, (char*)ConfigOptions[i].Data);
+       } else if(ConfigOptions[i].Type == CONFIG_BOOLEAN) {
+         fprintf(Output, "%s=%s\n", ConfigOptions[i].Item, (*(int*)ConfigOptions[i].Data)?"yes":"no");
+       } else {
+         fprintf(Output, "%s=%i\n", ConfigOptions[i].Item, *(int*)ConfigOptions[i].Data);
+       }
+     }
+     fclose(Output);
+     xchat_print(ph, "Saved Sparkles preferences\n");
    }
 
    if(!strcasecmp(word[2],"crami")) // cram into the input box
@@ -1758,31 +1985,40 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      xchat_commandf(ph, "settext %i", j);
    }
 
-   if(!strcasecmp(word[2],"set"))
+   if(!strcasecmp(word[2],"silentset"))
      INIConfigHandler(word[3], word[4], word_eol[5]);
+   if(!strcasecmp(word[2],"set")) {
+     xchat_printf(ph, "Setting %s::%s to %s", word[3], word[4], word_eol[5]);
+     INIConfigHandler(word[3], word[4], word_eol[5]);
+   }
    if(!strcasecmp(word[2],"rehash")) {
      sprintf(Buffer, ConfigFilePath, xchat_get_info(ph, "xchatdirfs"));
      ParseINI(fopen(Buffer,"rb"), INIConfigHandler);
    }
    if(!strcasecmp(word[2],"editconfig"))
-     xchat_commandf(ph,"spark aexec %s %s\n", TextEditor, ConfigFilePath);
+     xchat_commandf(ph,"spark aexec %s %s", TextEditor, ConfigFilePath);
 
    if(!strcasecmp(word[2],"aexec")||!strcasecmp(word[2],"asyncexec"))
      AsyncExec(word_eol[3]);
    if(!strcasecmp(word[2],"openlogs")) {
      const char *Chan = xchat_get_info(ph, "channel");
      const char *Network = xchat_get_info(ph, "network");
+     const char *Server = SafeGet(xchat_get_info(ph, "server"), NULL);
      if(strcasecmp(word[3],"")) {
        Chan = word[3];
        if(strcasecmp(word[4],"")) Network = word[4];
      }
+     char LogPath[100];
+     const char *LogMask;
+     xchat_get_prefs(ph, "irc_logmask", &LogMask, NULL);
+     const char *ReplaceWith[] = {Network, Chan, Server};
+     TextInterpolate(LogPath, LogMask, '%', "ncs", ReplaceWith);
    #ifdef HEXCHAT_PLUGIN_H
-     sprintf(Buffer, "%s/logs/%s-%s.log", xchat_get_info(ph, "xchatdirfs"), Network, Chan);
+     sprintf(Buffer, "%s/logs/%s", xchat_get_info(ph, "xchatdirfs"), LogPath);
    #else
-     sprintf(Buffer, "%s/xchatlogs/%s-%s.log", xchat_get_info(ph, "xchatdirfs"), Network, Chan);
+     sprintf(Buffer, "%s/xchatlogs/%s", xchat_get_info(ph, "xchatdirfs"), LogPath);
    #endif
      xchat_commandf(ph,"spark aexec %s %s\n", TextEditor, Buffer);
-     // todo: actually care what irc_logmask is but for now it is %n-%c.log
    }
 
    if(!strcasecmp(word[2],"repeatstring")) {
@@ -1831,9 +2067,6 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    if(!strcasecmp(word[2],"bigrainbow"))
      xchat_commandf(ph, "spark x5font @rr01 %s", word_eol[3]);
 
-   if(!strcasecmp(word[2],"GiveNickservPasswordToEvilYoshifox") || !strcasecmp(word[2],"GNPTEY") ||
-      !strcasecmp(word[2],"GiveNickservPasswordToEvilSquirrel") || !strcasecmp(word[2],"GNPTES"))
-     xchat_commandf(ph, "ms send NovaSquirrel My nickserv password: %s", SafeGet(xchat_get_info(ph, "nickserv"),"???"));
    if(!strcasecmp(word[2],"normalsay")) {
      if(SayHook != NULL) {
        xchat_unhook(ph, SayHook);
@@ -1866,10 +2099,10 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      xchat_commandf(ph, "say <c=%s>%s: %s</c>", PesterchumColor, Buffer, word_eol[3]);
    }
    if(!strcasecmp(word[2],"pestercolor"))
-     strcpy(PesterchumColor, word_eol[3]);
+     xchat_commandf(ph, "spark silentset Pesterchum Color %s", word_eol[3]);
 
    if(!strcasecmp(word[2],"pesterchanhook"))
-     strcpy(PesterchumChanHook, word_eol[3]);
+     xchat_commandf(ph, "spark silentset Pesterchum ChannelCommand %s", word_eol[3]);
 
    if(!strcasecmp(word[2],"sayhook") || !strcasecmp(word[2],"sayhooknospace")) {
      SayHookSpace = 1;
@@ -2032,12 +2265,13 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
          case 0x1f: Poke--; *(Poke++) = '\\'; *(Poke++) = 'u';  break;
          case 0x02: Poke--; *(Poke++) = '\\'; *(Poke++) = 'b';  break;
          case 0x03: Poke--; *(Poke++) = '\\'; *(Poke++) = 'c';  break;
-         case 0x16: Poke--; *(Poke++) = '\\'; *(Poke++) = 'i';  break;
+         case 0x1d: Poke--; *(Poke++) = '\\'; *(Poke++) = 'i';  break;
+         case 0x16: Poke--; *(Poke++) = '\\'; *(Poke++) = 'R';  break;
          case 0x0f: Poke--; *(Poke++) = '\\'; *(Poke++) = 'p';  break;
          case 0x07: Poke--; *(Poke++) = '\\'; *(Poke++) = 'a';  break;
          case '\\': *(Poke++) = '\\'; break;
          default:
-           if(!(isgraph(c)||c==' ')) {
+           if(!(isgraph2(c)||c==' ')) {
              *(--Poke) = 0;
              sprintf(TinyBuf, "\\x%x ", c);
              strcat(Buffer, TinyBuf);
@@ -2138,7 +2372,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    if(!strcasecmp(word[2],"rainbow") || !strcasecmp(word[2],"rainbowt")) {
      char *Poke = Buffer;
      for(i=0,j=0;word_eol[3][i];i++) {
-       if(isgraph(word_eol[3][i])) {
+       if(isgraph2(word_eol[3][i])) {
          *(Poke++) = 0x03;
          *(Poke++) = Rainbow[j][0];
          *(Poke++) = Rainbow[j++][1];
@@ -2167,7 +2401,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
 
    if(!strcasecmp(word[2],"replchars") || !strcasecmp(word[2],"replcharsi") || !strcasecmp(word[2],"replcharsim")) {
       if(strlen(word[3])&1) {
-        xchat_printf(ph, "A replchars character replace list's length must be an even number\n");
+        xchat_printf(ph, "The list given to replchars must be of an even length\n");
         return XCHAT_EAT_ALL;
       }
       int CaseSensitive = !strcasecmp(word[2],"replchars");
@@ -2176,26 +2410,22 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
       strcpy(Buffer, word_eol[4]);
       char *Poke = Buffer;
       while(*Poke) {
-        char old = *Poke;
         char *RList = word[3];
         while(*RList) {
-          if(old == *RList)
+          if(*Poke == *RList)
             *Poke = RList[1];
-          else if(!CaseSensitive && toupper(old) == toupper(*RList)) {
-            if(!MatchCase || !isalpha(old))
+          else if(!CaseSensitive && toupper(*Poke) == toupper(*RList)) {
+            if(!MatchCase || !isalpha(*Poke))
               *Poke = RList[1];
             else
-              *Poke = isupper(old)?toupper(RList[1]):tolower(RList[1]);
+              *Poke = isupper(*Poke)?toupper(RList[1]):tolower(RList[1]);
           }
-
-          RList++;
+          RList+=2;
         }
         Poke++;
       }
-      if(!strcasecmp(word[2],"replcharsi") || !strcasecmp(word[2],"replcharsim"))
-        xchat_commandf(ph, "settext %s", Buffer);
-      else
-        xchat_commandf(ph, "say %s", Buffer);
+
+      xchat_commandf(ph, "say %s", Buffer);
    }
 
    if(!strcasecmp(word[2],"onesayhook") || !strcasecmp(word[2],"me2cmd") || !strcasecmp(word[2],"say2cmd")) {
@@ -2261,7 +2491,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    if(!strcasecmp(word[2],"rainbow4") || !strcasecmp(word[2],"rainbow4t")) { // 04 08 09 12 13
      char *Poke = Buffer;
      for(i=0,j=0;word_eol[3][i];i++) {
-       if(isgraph(word_eol[3][i]) && !(i&3)) {
+       if(isgraph2(word_eol[3][i]) && !(i&3)) {
          *(Poke++) = 0x03;
          *(Poke++) = Rainbow[j][0];
          *(Poke++) = Rainbow[j++][1];
@@ -2444,7 +2674,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      char *Prefix = word[4];
      if(!strcasecmp(Prefix, "."))
        Prefix = "";
-     const char *UserList[40]; // nobody will ever trust this evil squirrel with >40 users
+     const char *UserList[100]; // nobody will ever trust this evil squirrel with >40 users
      list = xchat_list_get(ph, "users");
      if(list){
        while(xchat_list_next(ph, list)) {
@@ -2459,7 +2689,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
               continue;
             UserList[Users]=xchat_list_str(ph, list, "nick");
             Users = Users+1;
-            if(Users >= 40)
+            if(Users >= 100)
               break;
           }
        }
@@ -2513,63 +2743,76 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    if(!strcasecmp(word[2],"randnum"))
      xchat_printf(ph, "%sRandom number: %i \n", SparklesUser, rand2(strtol(word[3], NULL, 10)));
 
-
    if(!strcasecmp(word[2],"pesterchum")) {
      if(!strcasecmp(word[3],"on")) {
-       DisablePesterchum = 1; xchat_printf(ph,"%sPesterchum mode OFF",SparklesUser);
+       xchat_commandf(ph, "spark silentset Pesterchum Disabled on");
+       xchat_printf(ph,"%sPesterchum mode OFF",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       DisablePesterchum = 0; xchat_printf(ph,"%sPesterchum mode ON",SparklesUser);
+       xchat_commandf(ph, "spark silentset PrettyJanus Disabled off");
+       xchat_printf(ph,"%sPesterchum mode ON",SparklesUser);
      }
    }
    if(!strcasecmp(word[2],"prettyjanus")) {
      if(!strcasecmp(word[3],"on")) {
-       DisablePrettyJanus = 1; xchat_printf(ph,"%sPretty Janus OFF",SparklesUser);
+       xchat_commandf(ph, "spark silentset PrettyJanus Disabled on");
+       xchat_printf(ph,"%sPretty Janus OFF",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       DisablePrettyJanus = 0; xchat_printf(ph,"%sPretty Janus ON",SparklesUser);
+       xchat_commandf(ph, "spark silentset PrettyJanus Disabled off");
+       xchat_printf(ph,"%sPretty Janus ON",SparklesUser);
      }
    }
    if(!strcasecmp(word[2],"invitejoin")) {
      if(!strcasecmp(word[3],"on")) {
-       JoinOnInvite = 1; xchat_printf(ph,"%sJoin-on-invite enabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic JoinOnInvite on");
+       xchat_printf(ph,"%sJoin-on-invite enabled",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       JoinOnInvite = 0; xchat_printf(ph,"%sJoin-on-invite disabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic JoinOnInvite off");
+       xchat_printf(ph,"%sJoin-on-invite disabled",SparklesUser);
      }
    }
    if(!strcasecmp(word[2],"rejoin")) {
      if(!strcasecmp(word[3],"on")) {
-       RejoinKick = 1; xchat_printf(ph,"%sRejoin-on-kick enabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic RejoinOnKick on");
+       xchat_printf(ph,"%sRejoin-on-kick enabled",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       RejoinKick = 0; xchat_printf(ph,"%sRejoin-on-kick disabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic RejoinOnKick off");
+       xchat_printf(ph,"%sRejoin-on-kick disabled",SparklesUser);
      }
    }
    if(!strcasecmp(word[2],"autoident")) {
      if(!strcasecmp(word[3],"on")) {
-       DisableAutoIdent = 1; xchat_printf(ph,"%sAuto-ident disabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic DisableAutoIdent on");
+       xchat_printf(ph,"%sAuto-ident disabled",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       DisableAutoIdent = 0; xchat_printf(ph,"%sAuto-ident re-enabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic DisableAutoIdent off");
+       xchat_printf(ph,"%sAuto-ident re-enabled",SparklesUser);
      }
    }
 
    if(!strcasecmp(word[2],"autoghost")) {
      if(!strcasecmp(word[3],"on")) {
-       DisableAutoGhost = 1; xchat_printf(ph,"%sAuto-ghost disabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic DisableAutoGhost on");
+       xchat_printf(ph,"%sAuto-ghost disabled",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       DisableAutoGhost = 0; xchat_printf(ph,"%sAuto-ghost re-enabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic DisableAutoGhost on");
+       xchat_printf(ph,"%sAuto-ghost re-enabled",SparklesUser);
      }
    }
 
    if(!strcasecmp(word[2],"autonickdeblue")) {
      if(!strcasecmp(word[3],"on")) {
-       DisableAutoNickDeblue = 1; xchat_printf(ph,"%sAuto-nick-deblue disabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic DisableAutoNickColorReset on");
+       xchat_printf(ph,"%sAuto-nick color reset disabled",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       DisableAutoNickDeblue = 0; xchat_printf(ph,"%sAuto-nick-deblue re-enabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic DisableAutoNickColorReset off");
+       xchat_printf(ph,"%sAuto-nick color reset re-enabled",SparklesUser);
      }
    }
 
@@ -2584,10 +2827,12 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
 
    if(!strcasecmp(word[2],"activity2focus")) {
      if(!strcasecmp(word[3],"on")) {
-       Activity2Focus = 1; xchat_printf(ph,"%sActivity-to-Focus enabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic Activity2Focus on");
+       xchat_printf(ph,"%sActivity-to-Focus enabled",SparklesUser);
      }
      if(!strcasecmp(word[3],"off")) {
-       Activity2Focus = 0; xchat_printf(ph,"%sActivity-to-Focus disabled",SparklesUser);
+       xchat_commandf(ph, "spark silentset Automatic Activity2Focus off");
+       xchat_printf(ph,"%sActivity-to-Focus disabled",SparklesUser);
      }
    }
 
@@ -2723,11 +2968,6 @@ static int invite_cb(char *word[], void *userdata) {
 }
 
 static int userquit_cb(char *word[], void *userdata) {
-//* Devann has quit (NickServ (GHOST command used by Devannisnowaghost))
-//* NovaYoshi has quit (Killed (NickServ (GHOST command used by NovaYoshi__)))
-//* Haz has quit (NickServ (GHOST command used by sHazam))
-  // 1 nick
-  // 2 reason
   if(AutoReclaimNick) {
     if(MyNickCmp(word[1], GhostReclaimNick)) {
       xchat_commandf(ph, "nick %s", GhostReclaimNick);
@@ -2751,23 +2991,19 @@ static int youkick_cb(char *word[], void *userdata) {
 
 static int getnotice_cb(char *word[], void *userdata) {
 /*
-   if(MoveServicesToServer) {
-// todo: fix
-     const char *Server = xchat_get_info(ph, "server");
-     if(Server != NULL) {
-       xchat_list *list = xchat_list_get(ph, "channels");
-       if(list) {
-          while(xchat_list_next(ph, list)) {
-            if(!strcasecmp(xchat_list_str(ph, list, "server"), Server)) {
-              xchat_set_context(ph,(xchat_context *)xchat_list_str(ph, list, "context"))
-//xchat_list_int(ph, list, "type")==1
-            }
-          }
-          xchat_list_free(ph, list);
-       }
+   if(MoveServicesToServer) { // still not fixed, oh wellll
+     int Id;
+     xchat_get_prefs(ph, "id", NULL, &Id);
+     xchat_list *list = xchat_list_get(ph, "channels");
+     if(list) {
+       while(xchat_list_next(ph, list))
+         if(xchat_list_int(ph, list, "type")==1 && xchat_list_int(ph, list, "id")==Id)
+           xchat_set_context(ph,(xchat_context *)xchat_list_str(ph, list, "context"));
+       xchat_list_free(ph, list);
      }
    }
 */
+
    if(MyNickCmp(word[1], "NickServ")) {
      if(!DisableAutoIdent)
        if(NULL != strstr(word[2],"is registered and protected.") || NULL != strstr(word[2],"Please choose a different nickname"))
@@ -2801,6 +3037,20 @@ static int ctcp_cb(char *word[], void *userdata) {
   return XCHAT_EAT_NONE;
 }
 
+static int EatHighlightSay_cb(char *word[], void *userdata) {
+  if(!EatHighlights)
+    return XCHAT_EAT_NONE;
+  xchat_emit_print(ph, "Channel Message", word[1], word[2], word[3], word[4], NULL);
+  return XCHAT_EAT_ALL;
+}
+
+static int EatHighlightAct_cb(char *word[], void *userdata) {
+  if(!EatHighlights)
+    return XCHAT_EAT_NONE;
+  xchat_emit_print(ph, "Channel Action", word[1], word[2], word[3], word[4], NULL);
+  return XCHAT_EAT_ALL;
+}
+
 static int channelmessage_cb(char *word[], void *userdata) {
    // 1-nick, 2-text
    NeedSpaceBetweenX5Font = 0;
@@ -2808,7 +3058,7 @@ static int channelmessage_cb(char *word[], void *userdata) {
 
    int i = 0;
    if(!DisablePrettyJanus) {
-     for(i=0;JanusLinkbots[i]!=NULL&&strcmp("",JanusLinkbots[i])&&i<8;i++)
+     for(i=0;JanusLinkbots[i]!=NULL&&strcmp("",JanusLinkbots[i])&&i<4;i++)
        if(MyNickCmp(word[1], JanusLinkbots[i])) {
          if(word[2][0] == '<') {
            char Nick[80];
@@ -2889,43 +3139,6 @@ static int channelmessage_cb(char *word[], void *userdata) {
    return XCHAT_EAT_NONE;
 }
 
-enum ConfigTypes {
-  CONFIG_STRING,
-  CONFIG_BOOLEAN,
-  CONFIG_INTEGER,
-};
-struct ConfigItem {
-  char *Group;
-  char *Item;
-  void *Data;
-  char Type;
-  short Len;
-} ConfigOptions[] = {
-  {"General", "RandomType", &RandomType, CONFIG_INTEGER, 0},
-  {"General", "TextEditor", &TextEditor, CONFIG_STRING, 512},
-  {"Automatic", "RejoinOnKick", &RejoinKick, CONFIG_BOOLEAN, 0},
-  {"Automatic", "JoinOnInvite", &JoinOnInvite, CONFIG_BOOLEAN, 0},
-  {"Automatic", "DisableAutoIdent", &DisableAutoIdent, CONFIG_BOOLEAN, 0},
-  {"Automatic", "DisableAutoNickColorReset", &DisableAutoNickDeblue, CONFIG_BOOLEAN, 0},
-  {"Automatic", "DisableAutoGhost", &DisableAutoGhost, CONFIG_BOOLEAN, 0},
-  {"Automatic", "Activity2Focus", &Activity2Focus, CONFIG_BOOLEAN, 0},
-  {"Automatic", "DisableNetworkSayer", &DisableShowNetworkOnJoin, CONFIG_BOOLEAN, 0},
-  {"Automatic", "MoveNotifyToServerTab", &MoveNotifyToServer, CONFIG_BOOLEAN, 0},
-  {"Automatic", "MoveServicesToServerTab", &MoveServicesToServer, CONFIG_BOOLEAN, 0},
-  {"PrettyJanus", "Disabled", &DisablePrettyJanus, CONFIG_BOOLEAN, 0},
-  {"PrettyJanus", "Nick0", JanusLinkbots[0], CONFIG_STRING, 32},
-  {"PrettyJanus", "Nick1", JanusLinkbots[1], CONFIG_STRING, 32},
-  {"PrettyJanus", "Nick2", JanusLinkbots[2], CONFIG_STRING, 32},
-  {"PrettyJanus", "Nick3", JanusLinkbots[3], CONFIG_STRING, 32},
-  {"PrettyJanus", "Nick4", JanusLinkbots[4], CONFIG_STRING, 32},
-  {"PrettyJanus", "Nick5", JanusLinkbots[5], CONFIG_STRING, 32},
-  {"PrettyJanus", "Nick6", JanusLinkbots[6], CONFIG_STRING, 32},
-  {"PrettyJanus", "Nick7", JanusLinkbots[7], CONFIG_STRING, 32},
-  {"Pesterchum", "Disabled", &DisablePesterchum, CONFIG_BOOLEAN, 0},
-  {"Pesterchum", "ChannelCommand", PesterchumChanHook, CONFIG_STRING, 512},
-  {"Pesterchum", "Color", PesterchumColor, CONFIG_STRING, 64},
-  {NULL}, // <-- end marker
-};
 void INIConfigHandler(const char *Group, const char *Item, const char *Value) {
 //  printf("[%s] %s = %s\n", Group, Item, Value);
   int i, *Int;
@@ -2966,7 +3179,7 @@ int ParseINI(FILE *File, void (*Handler)(const char *Group, const char *Item, co
   char Group[512]="", *Item, *Value, Line[512]="", c, *Poke = NULL;
   if(File == NULL)
     return 0;
-  xchat_printf(ph, "Config file found\n");
+  xchat_printf(ph, "Sparkles config file found\n");
   int i;
   while(!feof(File)) {
     for(i=0,c=1;;i++) {
@@ -3009,7 +3222,8 @@ void xchat_plugin_get_info(char **name, char **desc, char **version, void **rese
 int xchat_plugin_deinit() {
    xchat_commandf(ph,"spark spawnquiet clear"); // no memory leaks please
    xchat_commandf(ph,"MENU -p4 DEL Sparkles");
-
+   if(CustomYiffBuffer)
+     free(CustomYiffBuffer);
    xchat_printf(ph,"Sparkles unloaded");
    return 1;
 }
@@ -3037,6 +3251,8 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
    xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/No autoghost\" \"spark autoghost on\" \"spark autoghost off\"");
    xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/No pesterchum assist\" \"spark pesterchum on\" \"spark pesterchum off\"");
    xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/No pretty janus\" \"spark prettyjanus on\" \"spark prettyjanus off\"");
+   xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/Disable highlights\" \"spark set Automatic DisableHighlights on\" \"spark set Automatic DisableHighlights off\"");
+   xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/Character counter\" \"spark set Automatic CharCounter on\" \"spark set Automatic CharCounter off\"");
 
    xchat_commandf(ph,"MENU ADD \"Sparkles/Cram\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Cram/Slash\" \"spark cram\"");
@@ -3049,6 +3265,7 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
    xchat_commandf(ph,"MENU ADD \"Sparkles/Reset tab colors\" \"spark chancolorset 0\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Remove sayhook\" \"spark sayhook off\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Remove mehook\" \"spark mehook off\"");
+   xchat_commandf(ph,"MENU ADD \"Sparkles/Save preferences\" \"spark saveprefs\"");   
    xchat_commandf(ph,"MENU ADD \"Sparkles/Sparkles Help\" \"spark help\"");
 
    /* tell xchat our info */
@@ -3069,6 +3286,9 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
    xchat_hook_print(ph, "Channel Action",         XCHAT_PRI_LOW, Activity2Focus_cb, (int)0);
    xchat_hook_print(ph, "Channel Action Hilight", XCHAT_PRI_LOW, Activity2Focus_cb, (int)0);
 
+   xchat_hook_print(ph, "Channel Msg Hilight",    XCHAT_PRI_HIGH, EatHighlightSay_cb, (int)0);
+   xchat_hook_print(ph, "Channel Action Hilight", XCHAT_PRI_HIGH, EatHighlightAct_cb, (int)0);
+
    xchat_hook_print(ph, "Notice", XCHAT_PRI_NORM, getnotice_cb, 0);
    xchat_hook_print(ph, "Quit", XCHAT_PRI_NORM, userquit_cb, 0);
    xchat_hook_print(ph, "You Join", XCHAT_PRI_NORM, WhatNetwork_cb,0);
@@ -3079,6 +3299,12 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
    xchat_hook_print(ph, "You Kicked", XCHAT_PRI_LOW, youkick_cb, 0);
    xchat_hook_print(ph, "Your Nick Changing", XCHAT_PRI_NORM, younick_cb, 0);
    xchat_hook_server(ph, "RAW LINE", XCHAT_PRI_NORM, RawServer_cb, NULL);
+
+   xchat_hook_timer(ph, 1000, timer_cb, NULL);
+   xchat_hook_print(ph, "Key Press",    XCHAT_PRI_NORM, charcounter_cb, NULL); 
+   xchat_hook_print(ph, "Your Message", XCHAT_PRI_NORM, charcounter_cb, NULL); 
+   xchat_hook_print(ph, "Your Action",  XCHAT_PRI_NORM, charcounter_cb, NULL); 
+   xchat_hook_print(ph, "Focus Tab",    XCHAT_PRI_NORM, charcounter_cb, NULL); 
    srand((unsigned)time(NULL));
    StartingTime = (unsigned)time(NULL);
 
@@ -3106,7 +3332,7 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
        }
        xchat_commandf(ph, "%s", Buffer);
      }
-     fclose(Script); 
+     fclose(Script);
    }
 
    xchat_printf(ph, "Sparkles version %s was loaded successfully \n",PVERSION);
