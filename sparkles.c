@@ -705,7 +705,7 @@ static int AttributeLoop(char *Out, char *In, char *Loop) {
 
 
       case '?':
-        while(!isgraph(In[i]) && i<EndI)
+        while(!isgraph2(In[i]) && i<EndI)
           Out[o++]=In[i++];
         switch(Caps) {
           case 0: Out[o++]=In[i++]; break;
