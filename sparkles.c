@@ -185,9 +185,14 @@ int memcasecmp(const char *Text1, const char *Text2, int Length) {
 }
 
 static int isgraph2(char k) { // unicode version
-  if(!isgraph(k)) return 0;
   unsigned char k2 = (unsigned char)k;
+  if(!isgraph(k) && k2 < 0xc0) return 0;
   return k2<0x80||k2>0xbf;
+}
+
+static int iscontinuationbyte(char k) {
+  unsigned char k2 = (unsigned char)k;
+  return k2>=0x80&&k2<=0xbf;
 }
 
 static char *ReadTextFile(const char *Name) {
@@ -271,10 +276,10 @@ static int OETextMatch(char *Inputs[], const char *MatchTo) {
     case 1: // *@
       End = strrchr(Input, 0);
       End -= strlen(Match);
-      Decision = memcasecmp(End, Match, strlen(Match));
+      Decision = !memcasecmp(End, Match, strlen(Match));
       break;
     case 2: // @*
-      Decision = memcasecmp(Input, Match, strlen(Match));
+      Decision = !memcasecmp(Input, Match, strlen(Match));
       break;
     case 3: // *@*
       Decision = strstr(Input, Match) != NULL;
@@ -384,9 +389,15 @@ static int on_event_cb(char *word[], void *userdata) {
   xchat_free(ph, Word3);
   xchat_free(ph, Word4);
 
+  if(!strcasecmp(Buffer, "DeleteEvent"))
+    return XCHAT_EAT_ALL;
+
   xchat_command(ph, Buffer);
-  if(Info->Flags & OEF_TEMPORARY)
+  if(Info->Flags & OEF_TEMPORARY) {
+    QuietOnEvents++;
     xchat_commandf(ph, "spark onevent delete %i", Info->Slot);
+    QuietOnEvents--;
+  }
 
   return XCHAT_EAT_NONE;
 }
@@ -808,6 +819,12 @@ static int AttributeLoop(char *Out, char *In, char *Loop) {
   int LoopTimes = 0;
 
   for(;i<EndI;) {
+    if(iscontinuationbyte(In[i])) {
+      while(iscontinuationbyte(In[i])) {
+        Out[o++] = In[i++];
+      }
+      continue;
+    }
     switch(Loop[s++]) {
       case 'c':
         Out[o++]=0x03;
@@ -2142,6 +2159,12 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
          fprintf(Output, "%s=%i\n", ConfigOptions[i].Item, *(int*)ConfigOptions[i].Data);
        }
      }
+     fprintf(Output, "\n[OnEventList]\n");
+     for(i=0;i<ONEVENTS_SIZE;i++)
+       if(OnEventInfos[i] && OnEventInfos[i]->Flags & OEF_SAVE) {
+         ListOnEvent(Buffer, OnEventInfos[i]);
+         fprintf(Output, "%i=%s\n", i, Buffer);
+       }
      fclose(Output);
      xchat_print(ph, "Saved Sparkles preferences\n");
    }
@@ -2938,6 +2961,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
              OnEventInfos[i] = OnEventInfos[j];
              OnEventInfos[j] = NULL;
              OnEventInfos[i]->Slot = i;
+             break;
            }
        }
        xchat_print(ph, "Renumbered the OnEvent list");
@@ -2967,7 +2991,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
          if(OnEventInfos[j]) {
            OnEventInfos[j]->Flags &= ~OEF_ENABLED;
            if(!QuietOnEvents)
-             xchat_printf(ph, "Disabling OnEvent item %i", i);
+             xchat_printf(ph, "Disabling OnEvent item %i", j);
          }
        }
      } else if(!strcasecmp(word[3], "enable")) {
@@ -2976,13 +3000,16 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
          if(OnEventInfos[j]) {
            OnEventInfos[j]->Flags |= OEF_ENABLED;
            if(!QuietOnEvents)
-             xchat_printf(ph, "Enabling OnEvent item %i", i);
+             xchat_printf(ph, "Enabling OnEvent item %i", j);
          }
        }
      } else if(!strcasecmp(word[3], "set")) {
        j = -1;
-       if(isdigit(word[4][0])) // user selected a specific slot
+       if(isdigit(word[4][0])) { // user selected a specific slot
          j = strtol(word[4], NULL, 10);
+         if(j < 0 || j >= ONEVENTS_SIZE)
+           return XCHAT_EAT_ALL;
+       }
        if(j == -1) {
          for(j=0;j<ONEVENTS_SIZE;j++)
            if(!OnEventInfos[j])
@@ -3328,6 +3355,21 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        xchat_list_free(ph, list);
      }
    }
+
+   if(!strcasecmp(word[2],"spaceysay")) {
+     WasValid = 1;
+     xchat_commandf(ph, "spark atloop |*_ say %s", word_eol[3]);
+   }
+
+   if(!strcasecmp(word[2],"echofocused")) { // echo to focused tab
+     WasValid = 1;
+     xchat_context *Focused = xchat_find_context(ph, NULL, NULL);
+     xchat_context *This = xchat_get_context(ph);
+     xchat_set_context(ph, Focused);
+     xchat_print(ph, word_eol[3]);
+     xchat_set_context(ph, This);
+   }
+
    if(!strcasecmp(word[2],"rchan")) { // with preserved context
      WasValid = 1;
      xchat_command(ph, "spark contextstack push");
@@ -3630,6 +3672,12 @@ static int channelmessage_cb(char *word[], void *userdata) {
 
 void INIConfigHandler(const char *Group, const char *Item, const char *Value) {
 //  printf("[%s] %s = %s\n", Group, Item, Value);
+  if(!strcasecmp(Group, "OnEventList")) {
+    QuietOnEvents++;
+    xchat_commandf(ph, "spark onevent set %s", Value);
+    QuietOnEvents--;
+    return;
+  }
   int i, *Int;
   char *String;
   for(i=0;ConfigOptions[i].Group!=NULL;i++)

@@ -135,7 +135,7 @@ CR   | Switch to random capitalization
 Repeats Text as many times as Times specifies and says it
 
 ### space2newline
-`/spark space2newline`
+`/spark space2newline Text`
 
 makes
 
@@ -146,6 +146,15 @@ talk
 like
 
 this
+
+### spaces2newline
+`/spark spaces2newline Count Text`
+
+Specifies amount of "words" to have per line
+
+### spaceysay
+`/spark spaceysay Text`
+Inserts spaces between every two characters
 
 ### rot13
 `/spark rot13 Text`
@@ -364,10 +373,12 @@ Set a specific config option. Yes/no and on/off are accepted for boolean options
 Option                        | Effect
 ----------------------------- | ------
 General TextEditor            | Path to a text editor to use
+General QuietOnEvents         | Doesn't say anything when doing /spark onevent
 Automatic ForceUTF8           | Force UTF-8 in all channels
 Automatic CharCounter         | Displays a character counter if on
 Automatic DisableNetworkSayer | Disable showing the network name upon joining a channel
 Automatic DisableHighlights   | Disables highlights if on
+Automatic PMAlerts            | Alert if PM'd with the window focused (see also PMAlertsEvenWithoutFocus and PMAlertsEvenWithSameNetwork)
 Pesterchum ChannelCommand     | Command to use when speaking on Pesterchum channels
 Pesterchum Color              | Color to use when speaking on Pesterchum channels (R,G,B)
 
@@ -511,6 +522,53 @@ Copies the current topic to the input box with colors and effects included.
 Runs a program like /exec but asynchronously (only supported on Windows currently)
 
 =======
+### on event
+`/spark onevent list`
+
+`/spark onevent delete all/number`
+
+`/spark onevent enable all/number`
+
+`/spark onevent disable all/number`
+
+List, delete, enable or disable onevent numbers
+
+`/spark onevent renumber`
+
+Reorder the list to get rid of any gaps.
+
+`/spark onevent set Flags EventName Condition Condition Condition Response`
+
+Add an OnEvent trigger, which will run Response as a command when a text event happens with specific conditions.
+
+Conditions are set up like "1=text" where the number is the parameter number in the text events list.
+Use two =s for a case-sensitive compare, or != or !== for a condition that's true if it's not equal.
+Use a * at the start and/or end of the thing ot compare to if you want to put a wildcard there.
+
+0 is a special parameter:
+
+0x   | Effect
+---- | ------
+0c   | Channel or tab name
+0n   | Nick
+0N   | Network
+0s   | Server
+0w   | Window status: active, normal or hidden
+
+Flag | Effect
+---- | ------
+1-29 | Must be the first thing in the flags; selects a slot
+h    | Use high priority when registering the hook
+s    | Save trigger in Sparkles config when that's saved
+t    | Trigger is temporary and disables 
+d    | Trigger starts out disabled
+
+If you don't have any flags you can use "." in place of any flags.
+The response can use $1, $2, $3 etc to refer to the text event parameters, or $n or $c for your nick or the channel name. $$ comes out as a $.
+
+"DeleteEvent" is accepted as a response and it will delete the event.
+
+=======
 
 ### chancolorset
 `/spark chancolorset N`
@@ -536,3 +594,7 @@ Saves preferences to a .ini file
 `/spark randnum Limit`
 
 Generates a random number
+
+### echofocused
+`/spark echofocused Text`
+Prints text to the currently focused tab
