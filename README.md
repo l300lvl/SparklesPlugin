@@ -128,8 +128,6 @@ CR   | Switch to random capitalization
 `?   | Copies all the way to the next isgraph() character
 `c   | Inserts color code with no special behavior
 
-Atloop is NOT fixed for Unicode yet.
-
 =======
 ### repeatstring Times Text
 `/spark repeatstring String`

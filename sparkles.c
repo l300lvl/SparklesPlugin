@@ -21,7 +21,7 @@
 
 #define PNAME "Nova's Sparkles"
 #define PDESC "Mix of annoying/powerful/useful stuff"
-#define PVERSION "1.0"
+#define PVERSION "1.1"
 #define USE_SPARKLES_USER 0
 #define ENABLE_NSFW_CONTENT 1
 #define PESTERCHUM_NETWORK "Pesterchum"
@@ -49,6 +49,7 @@ static int LastYiff  =  -1;
 static int DisableAutoIdent = 0;
 static int DisableAutoNickDeblue= 0;
 static int DisableAutoGhost=0;
+static int DisableAutoGhostChainBreak=0;
 static int DisablePesterchum=0;
 static int DisablePrettyJanus=0;
 static int DisableSparklesCTCP = 0;
@@ -72,7 +73,7 @@ static char *CustomYiffBuffer = NULL;
 static int CustomYiffCount = 0;
 static char *CustomYiffPointers[500];
 
-static unsigned int StartingTime = 0; // to help stop "oh my god I started xchat and it autoghosted stuff"
+static unsigned int GhostDelayTime = 0; // to help stop "oh my god I started xchat and it autoghosted stuff"
 static int GrabbingTopic = 0;
 static char CommandPrefix[5] = "/"; // because this is able to be changed in XChat
 
@@ -83,6 +84,10 @@ static int ContextStackSP = 0;
 static xchat_context *ContextStack[16];
 static int RandomType = 1;
 static int CharCounter = 0;
+static int PMAlerts = 0;
+static int PMAlertsEvenWithoutFocus = 0;
+static int PMAlertsEvenWithSameNetwork = 0;
+static int QuietOnEvents = 0;
 
 static int DisableShowNetworkOnJoin=0;
 static int NeedSpaceBetweenX5Font = 0;
@@ -101,6 +106,25 @@ static char *Rainbow[]={"04","08","09","12","13"};
 static void INIConfigHandler(const char *Group, const char *Item, const char *Value);
 static int ParseINI(FILE *File, void (*Handler)(const char *Group, const char *Item, const char *Value));
 
+enum OnEventFlags {
+  OEF_ENABLED = 1,
+  OEF_TEMPORARY = 2,
+  OEF_SAVE = 4,
+  OEF_HIGH_PRIORITY = 8,
+};
+
+struct OnEventInfo {
+  int  Slot;
+  int  Flags; // 1 = enabled, 2 = temporary, 4 = save
+  char EventName[32];
+  char Match[10][80];
+  char Response[500];
+  xchat_hook *Hook;
+};
+
+#define ONEVENTS_SIZE 30
+struct OnEventInfo *OnEventInfos[ONEVENTS_SIZE];
+
 enum ConfigTypes {
   CONFIG_STRING,
   CONFIG_BOOLEAN,
@@ -116,13 +140,18 @@ struct ConfigItem {
 } ConfigOptions[] = {
   {"General", "RandomType", &RandomType, CONFIG_INTEGER, 0},
   {"General", "TextEditor", &TextEditor, CONFIG_STRING, 512},
+  {"General", "QuietOnEvents", &QuietOnEvents, CONFIG_BOOLEAN, 0},
   {"Automatic", "ForceUTF8", &ForceUTF8, CONFIG_BOOLEAN, 0},
   {"Automatic", "CharCounter", &CharCounter, CONFIG_BOOLEAN, 0},
+  {"Automatic", "PMAlerts", &PMAlerts, CONFIG_BOOLEAN, 0},
+  {"Automatic", "PMAlertsEvenWithoutFocus", &PMAlertsEvenWithoutFocus, CONFIG_BOOLEAN, 0},
+  {"Automatic", "PMAlertsEvenSameNetwork", &PMAlertsEvenWithSameNetwork, CONFIG_BOOLEAN, 0},
   {"Automatic", "RejoinOnKick", &RejoinKick, CONFIG_BOOLEAN, 0},
   {"Automatic", "JoinOnInvite", &JoinOnInvite, CONFIG_BOOLEAN, 0},
   {"Automatic", "DisableAutoIdent", &DisableAutoIdent, CONFIG_BOOLEAN, 0},
   {"Automatic", "DisableAutoNickColorReset", &DisableAutoNickDeblue, CONFIG_BOOLEAN, 0},
   {"Automatic", "DisableAutoGhost", &DisableAutoGhost, CONFIG_BOOLEAN, 0},
+  {"Automatic", "DisableAutoGhostChainBreak", &DisableAutoGhostChainBreak, CONFIG_BOOLEAN, 0},
   {"Automatic", "Activity2Focus", &Activity2Focus, CONFIG_BOOLEAN, 0},
   {"Automatic", "DisableNetworkSayer", &DisableShowNetworkOnJoin, CONFIG_BOOLEAN, 0},
   {"Automatic", "DisableHighlights", &EatHighlights, CONFIG_BOOLEAN, 0},
@@ -138,6 +167,22 @@ struct ConfigItem {
   {"Pesterchum", "Color", PesterchumColor, CONFIG_STRING, 64},
   {NULL}, // <-- end marker
 };
+
+void strlcpy(char *Destination, const char *Source, int MaxLength) {
+  // MaxLength is directly from sizeof() so it includes the zero
+  int SourceLen = strlen(Source);
+  if((SourceLen+1) < MaxLength)
+    MaxLength = SourceLen + 1;
+  memcpy(Destination, Source, MaxLength-1);
+  Destination[MaxLength-1] = 0;
+}
+
+int memcasecmp(const char *Text1, const char *Text2, int Length) {
+  for(;Length;Length--)
+    if(tolower(*(Text1++)) != tolower(*(Text2++)))
+      return 1;
+  return 0;
+}
 
 static int isgraph2(char k) { // unicode version
   if(!isgraph(k)) return 0;
@@ -163,6 +208,81 @@ static char *ReadTextFile(const char *Name) {
   fclose(File);
   Buffer[FileSize] = 0;
   return Buffer;
+}
+
+static int OETextMatch(char *Inputs[], const char *MatchTo) {
+  int CaseSensitive = 0, Negate = 0, Decision = 0;
+  int Wild = 0, InputNum, SpecialInput = 0;
+  const char *Seek = MatchTo+1;
+  char *Stripped;
+  InputNum = MatchTo[0] - '0';
+  char Input[800];
+  if(InputNum < 0 || InputNum > 4)
+    return 0;
+  if(InputNum == 0) { // special set of inputs
+    SpecialInput = 1;
+    const char *CopyFrom = NULL;
+    switch(*(Seek++)) {
+      case 'c': CopyFrom = xchat_get_info(ph, "channel"); break;
+      case 'n': CopyFrom = xchat_get_info(ph, "nick"); break;
+      case 'N': CopyFrom = xchat_get_info(ph, "network"); break;
+      case 's': CopyFrom = xchat_get_info(ph, "server"); break;
+      case 'w': CopyFrom = xchat_get_info(ph, "win_status"); break;
+    }
+    if(!CopyFrom) CopyFrom = "";
+    strlcpy(Input, CopyFrom, 800);
+  } else {
+    Stripped = xchat_strip(ph, Inputs[InputNum], -1, 1 | 2);
+    strlcpy(Input, Stripped, 800);
+    xchat_free(ph, Stripped);
+  }
+  char Match[strlen(MatchTo)+1];
+  if(*Seek == '!') {
+    Negate = 1;
+    Seek++;
+  }
+  if(*(Seek++) != '=')
+    return 0;
+  if(*Seek == '=') { // two equals signs, turn on case sensitive mode
+    CaseSensitive = 1;
+    Seek++;
+  }
+  if(*Seek == '*') { // left wildcard
+    Wild |= 1;
+    Seek++;
+  }
+  strcpy(Match, Seek);
+  char *End = strrchr(Match, 0);
+  if(End[-1] == '*') { // right wildcard
+    Wild |= 2;
+    End[-1] = 0;
+  }
+  if(!CaseSensitive) { // make input all lowercase if not case sensitive
+    char *ToLower;
+    for(ToLower = Input; *ToLower; ToLower++)
+      *ToLower = tolower(*ToLower);
+    for(ToLower = Match; *ToLower; ToLower++)
+      *ToLower = tolower(*ToLower);
+  }
+  switch(Wild) {
+    case 0: // @
+      Decision = !strcasecmp(Input, Match);
+      break;
+    case 1: // *@
+      End = strrchr(Input, 0);
+      End -= strlen(Match);
+      Decision = memcasecmp(End, Match, strlen(Match));
+      break;
+    case 2: // @*
+      Decision = memcasecmp(Input, Match, strlen(Match));
+      break;
+    case 3: // *@*
+      Decision = strstr(Input, Match) != NULL;
+      break;
+  }
+  if(Negate)
+    Decision ^= 1;
+  return Decision;
 }
 
 static void TextInterpolate(char *Out, const char *In, char Prefix, const char *ReplaceThis, const char *ReplaceWith[]) {
@@ -240,6 +360,60 @@ static int timer_cb(void *userdata) {
 static int charcounter_cb(char *word[], void *userdata) {
   if(CharCounter)
     UpdateCharCounter();
+  return XCHAT_EAT_NONE;
+}
+
+static int on_event_cb(char *word[], void *userdata) {
+  struct OnEventInfo *Info = (struct OnEventInfo*)userdata;
+  if(!Info)
+    return XCHAT_EAT_NONE;
+  int i;
+  for(i=0;Info->Match[i][0];i++)
+    if(!OETextMatch(word, Info->Match[i]))
+      return XCHAT_EAT_NONE;
+
+  char *Word1 = xchat_strip(ph, word[1], -1, 3);
+  char *Word2 = xchat_strip(ph, word[2], -1, 3);
+  char *Word3 = xchat_strip(ph, word[3], -1, 3);
+  char *Word4 = xchat_strip(ph, word[4], -1, 3);
+  char Buffer[2048];
+  const char *ReplaceWith[] = {xchat_get_info(ph, "nick"), xchat_get_info(ph, "channel"), Word1, Word2, Word3, Word4};
+  TextInterpolate(Buffer, Info->Response, '$', "nc1234", ReplaceWith);
+  xchat_free(ph, Word1);
+  xchat_free(ph, Word2);
+  xchat_free(ph, Word3);
+  xchat_free(ph, Word4);
+
+  xchat_command(ph, Buffer);
+  if(Info->Flags & OEF_TEMPORARY)
+    xchat_commandf(ph, "spark onevent delete %i", Info->Slot);
+
+  return XCHAT_EAT_NONE;
+}
+
+static int privatemessage_cb(char *word[], void *userdata) {
+  if(PMAlerts) {
+    if(!PMAlertsEvenWithoutFocus) {
+/* well apparently this is in xchat already
+      HWND FGWindow = GetForegroundWindow();
+      HWND XChat = (HWND)xchat_get_info(ph, "win_ptr");
+      if(FGWindow != XChat)
+        return XCHAT_EAT_NONE;
+*/
+      if(strcasecmp(xchat_get_info(ph, "win_status"), "active"))
+        return XCHAT_EAT_NONE;
+    }
+    xchat_context *Focused = xchat_find_context(ph, NULL, NULL);
+    xchat_context *This = xchat_get_context(ph);
+    if(Focused == This)
+      return XCHAT_EAT_NONE;
+    char Network[32];
+    strlcpy(Network, xchat_get_info(ph, "network"), 32);
+    xchat_set_context(ph, Focused);
+    if(PMAlertsEvenWithSameNetwork || !xchat_get_info(ph, "network") || strcasecmp(Network, xchat_get_info(ph, "network")))
+      xchat_printf(ph, "----\t\x03" "31PM on %s with %s: %s", Network, word[1], word[2]);
+    xchat_set_context(ph, This);
+  }
   return XCHAT_EAT_NONE;
 }
 
@@ -336,7 +510,7 @@ static int IsChannel() {
 }
 
 static int MyNickCmp(char *N1, char *N2) {
-   static char *StripName;
+   char *StripName;
    StripName = xchat_strip(ph, N1, -1, 3);
    if(StripName == NULL)
      return 0;
@@ -981,7 +1155,7 @@ static char *TrollFilter(char *Output, char *Input, char *Troll) {
       j=0;
       while(*Peek) {
         *Poke = ((j&1)?tolower(*Peek):toupper(*Peek));
-        if(isgraph(*Poke)) j++;
+        if(isgraph2(*Poke)) j++;
         if(*Poke == 'O' && Poke[-1]==':') *Poke = 'o';
         Poke++; Peek++;
       }
@@ -1739,15 +1913,18 @@ static int Activity2Focus_cb(char *word[], void *userdata) {
 }
 
 static int RawServer_cb(char *word[], char *word_eol[], void *userdata) {
-  if(GrabbingTopic) {
-    if(!strcasecmp(word[2],"332")) {
-      char *Copy = word_eol[5];
-      if(*Copy == ':') Copy++;
-      xchat_commandf(ph, "settext /topic %s", Copy);
-      xchat_commandf(ph, "setcursor 7");
-      GrabbingTopic = 0;
-      return XCHAT_EAT_ALL;
-    }
+  // ERROR :Closing Link: Nick[host] services.anthrochat.net (NickServ (GHOST command used by Nick2))
+  if(!DisableAutoGhostChainBreak && !strcasecmp(word[1], "ERROR") && NULL != strstr(word[3], "GHOST"))
+    GhostDelayTime = (unsigned)time(NULL);
+
+  if(GrabbingTopic && !strcasecmp(word[2],"332")) {
+    char *Copy = word_eol[5];
+    if(*Copy == ':')
+      Copy++;
+    xchat_commandf(ph, "settext /topic %s", Copy);
+    xchat_commandf(ph, "setcursor 7");
+    GrabbingTopic = 0;
+    return XCHAT_EAT_ALL;
   }
 
   if(DisablePlusJFix || !RejoinKick)
@@ -1762,7 +1939,6 @@ static int RawServer_cb(char *word[], char *word_eol[], void *userdata) {
       }
     }
   }
-//>> :kuroi.irc.nolimitzone.com 495 NovaYoshi #acmlm :You must wait 10 seconds after being kicked to rejoin (+J)
   return XCHAT_EAT_NONE;
 }
 
@@ -1883,6 +2059,31 @@ static int TrapNormalPost_cb(char *word[], char *word_eol[], void *userdata) {
   }
   return XCHAT_EAT_NONE;
 }
+
+static void ListOnEvent(char *Buffer, struct OnEventInfo *Info) {
+  int j;
+  *Buffer = 0;
+  sprintf(Buffer, "%i", Info->Slot);
+  if(Info->Flags ^ OEF_ENABLED) {
+    if(!(Info->Flags) & OEF_ENABLED)
+      strcat(Buffer, "d");
+    if(Info->Flags & OEF_TEMPORARY)
+      strcat(Buffer, "t");
+    if(Info->Flags & OEF_SAVE)
+      strcat(Buffer, "s");
+  }
+  strcat(Buffer, " \"");
+  strcat(Buffer, Info->EventName);
+  strcat(Buffer, "\" ");
+  for(j=0;j<10;j++)
+    if(Info->Match[j][0]) {
+      strcat(Buffer, "\"");
+      strcat(Buffer, Info->Match[j]);
+      strcat(Buffer, "\" ");
+    }
+  strcat(Buffer, Info->Response);
+}
+
 static int AsyncExec(char *Command) {
 //shamelessy taken from hexchat's exec plugin
 #ifdef _WIN32
@@ -1906,14 +2107,17 @@ static int AsyncExec(char *Command) {
 }
 static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    char Buffer[2048]; int i=0, j=0, k=0;
+   int WasValid = 0;
    if(!strcasecmp(word[2],"sprintf") || !strcasecmp(word[2],"slashf")) {
       if(word[3] != NULL) {
         sparkles_text_unescape(Buffer, word_eol[3]);
         xchat_commandf(ph,"%s", Buffer);
       }
+      WasValid = 1;
    }
 
    if(!strcasecmp(word[2],"saveprefs")) { // save preferences back to the ini
+     WasValid = 1;
      CreateDirectoriesForPath(ConfigFilePath);
      FILE *Output = fopen(ConfigFilePath,"w");
      if(!Output) {
@@ -1942,10 +2146,13 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      xchat_print(ph, "Saved Sparkles preferences\n");
    }
 
-   if(!strcasecmp(word[2],"crami")) // cram into the input box
+   if(!strcasecmp(word[2],"crami")) { // cram into the input box
+     WasValid = 1;
      xchat_commandf(ph, "spark onesayhook settext cram %s", word_eol[3]);
+   }
 
    if(!strcasecmp(word[2],"cram")) { // cram multiple posts into one
+     WasValid = 1;
      int Mode = word[3]!=NULL && !strcasecmp(word[3],"noslash");
      const char *Peek = xchat_get_info(ph, "inputbox");
      char *Poke = Buffer;
@@ -1973,34 +2180,45 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"mathaddi")) {
+     WasValid = 1;
      for(i=3;*word[i];i++)
        j+=strtol(word[i], NULL, 10);
      xchat_commandf(ph, "settext %i", j);
    }
 
    if(!strcasecmp(word[2],"mathmuli")) {
+     WasValid = 1;
      j=1;
      for(i=3;*word[i];i++)
        j*=strtol(word[i], NULL, 10);
      xchat_commandf(ph, "settext %i", j);
    }
 
-   if(!strcasecmp(word[2],"silentset"))
+   if(!strcasecmp(word[2],"silentset")) {
+     WasValid = 1;
      INIConfigHandler(word[3], word[4], word_eol[5]);
+   }
    if(!strcasecmp(word[2],"set")) {
+     WasValid = 1;
      xchat_printf(ph, "Setting %s::%s to %s", word[3], word[4], word_eol[5]);
      INIConfigHandler(word[3], word[4], word_eol[5]);
    }
    if(!strcasecmp(word[2],"rehash")) {
+     WasValid = 1;
      sprintf(Buffer, ConfigFilePath, xchat_get_info(ph, "xchatdirfs"));
      ParseINI(fopen(Buffer,"rb"), INIConfigHandler);
    }
-   if(!strcasecmp(word[2],"editconfig"))
+   if(!strcasecmp(word[2],"editconfig")) {
+     WasValid = 1;
      xchat_commandf(ph,"spark aexec %s %s", TextEditor, ConfigFilePath);
+   }
 
-   if(!strcasecmp(word[2],"aexec")||!strcasecmp(word[2],"asyncexec"))
+   if(!strcasecmp(word[2],"aexec")||!strcasecmp(word[2],"asyncexec")) {
+     WasValid = 1;
      AsyncExec(word_eol[3]);
+   }
    if(!strcasecmp(word[2],"openlogs")) {
+     WasValid = 1;
      const char *Chan = xchat_get_info(ph, "channel");
      const char *Network = xchat_get_info(ph, "network");
      const char *Server = SafeGet(xchat_get_info(ph, "server"), NULL);
@@ -2022,52 +2240,89 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"repeatstring")) {
+     WasValid = 1;
      *Buffer = 0;
      j = strtol(word[3],NULL,10);
      for(i=0;i<j;i++)
        strcat(Buffer, word_eol[4]);
      xchat_commandf(ph, "say %s", Buffer);
    }
-   if(!strcasecmp(word[2],"useinputbox"))
+   if(!strcasecmp(word[2],"useinputbox")) {
+     WasValid = 1;
      xchat_commandf(ph, "%s %s", word_eol[3], SafeGet(xchat_get_info(ph, "inputbox"),NULL));
-   if(!strcasecmp(word[2],"sayinfo"))
+   }
+   if(!strcasecmp(word[2],"sayinfo")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", SafeGet(xchat_get_info(ph, word[3]),NULL));
-   if(!strcasecmp(word[2],"sprintfi") || !strcasecmp(word[2],"slashfi")) // "spark slashf settext" shortcut
+   }
+   if(!strcasecmp(word[2],"sprintfi") || !strcasecmp(word[2],"slashfi")) { // "spark slashf settext" shortcut
+     WasValid = 1;
      xchat_commandf(ph,"spark sprintf settext %s", SafeGet(word_eol[3],""));
-   if(!strcasecmp(word[2],"sprintfs") || !strcasecmp(word[2],"slashfs")) // "spark slashf say" shortcut
+   }
+   if(!strcasecmp(word[2],"sprintfs") || !strcasecmp(word[2],"slashfs")) { // "spark slashf say" shortcut
+     WasValid = 1;
      xchat_commandf(ph,"spark sprintf say %s", SafeGet(word_eol[3],""));
-   if(!strcasecmp(word[2],"sprintfm") || !strcasecmp(word[2],"slashfm")) // "spark slashf me" shortcut
+   }
+   if(!strcasecmp(word[2],"sprintfm") || !strcasecmp(word[2],"slashfm")) { // "spark slashf me" shortcut
+     WasValid = 1;
      xchat_commandf(ph,"spark sprintf me %s", SafeGet(word_eol[3],""));
-   if(!strcasecmp(word[2],"driving"))
+   }
+   if(!strcasecmp(word[2],"driving")) {
+     WasValid = 1;
      xchat_commandf(ph,"say driving %i miles to %s's house %s", rand2(1000), word[3], word_eol[4]);
-   if(!strcasecmp(word[2],"drivingaway"))
+   }
+   if(!strcasecmp(word[2],"drivingaway")) {
+     WasValid = 1;
      xchat_commandf(ph,"say driving %i miles away from %s's house %s", rand2(1000), word[3], word_eol[4]);
+   }
    if(!strcasecmp(word[2],"ghost2")) { // passwordless ghost with auto reclaim
+     WasValid = 1;
      xchat_commandf(ph,"ns ghost %s %s", word[3], SafeGet(xchat_get_info(ph, "nickserv"),""));
      AutoReclaimNick = 1;
      strcpy(GhostReclaimNick, word[3]);
      xchat_commandf(ph,"spark spawnquiet 3 s nick %s", word[3]);
    }
-   if(!strcasecmp(word[2],"ghost") && (NULL!=xchat_get_info(ph, "nickserv"))) // passwordless ghost
+   if(!strcasecmp(word[2],"ghost") && (NULL!=xchat_get_info(ph, "nickserv"))) { // passwordless ghost
+     WasValid = 1;
      xchat_commandf(ph,"ns ghost %s %s", word[3], SafeGet(xchat_get_info(ph, "nickserv"),""));
-   if(!strcasecmp(word[2],"release") && (NULL!=xchat_get_info(ph, "nickserv"))) // passwordless release
+   }
+   if(!strcasecmp(word[2],"release") && (NULL!=xchat_get_info(ph, "nickserv"))) { // passwordless release
+     WasValid = 1;
      xchat_commandf(ph,"ns release %s %s", word[3], SafeGet(xchat_get_info(ph, "nickserv"),""));
-   if(!strcasecmp(word[2],"ident") && (NULL!=xchat_get_info(ph, "nickserv"))) // passwordless identify
+   }
+   if(!strcasecmp(word[2],"ident") && (NULL!=xchat_get_info(ph, "nickserv"))) { // passwordless identify
+     WasValid = 1;
      xchat_commandf(ph,"ns identify %s", SafeGet(xchat_get_info(ph, "nickserv"),""));
-   if(!strcasecmp(word[2],"recover") && (NULL!=xchat_get_info(ph, "nickserv"))) // passwordless recover
+   }
+   if(!strcasecmp(word[2],"recover") && (NULL!=xchat_get_info(ph, "nickserv"))) { // passwordless recover
+     WasValid = 1;
      xchat_commandf(ph,"ns recover %s", SafeGet(xchat_get_info(ph, "nickserv"),""));
+   }
 #if ENABLE_NSFW_CONTENT
-   if(!strcasecmp(word[2],"davyiff")) // dav_the_fox yiff
+   if(!strcasecmp(word[2],"davyiff")) { // dav_the_fox yiff
+     WasValid = 1;
      DoDavYiff(word[3]);
+   }
 #endif
-   if(!strcasecmp(word[2],"35font"))
+   if(!strcasecmp(word[2],"35font")) {
+     WasValid = 1;
      Print35Font(word_eol[4], word[3]);
-   if(!strcasecmp(word[2],"x5font"))
+   }
+   if(!strcasecmp(word[2],"x5font")) {
+     WasValid = 1;
      PrintX5Font(word_eol[4], word[3]);
-   if(!strcasecmp(word[2],"bigrainbow"))
+   }
+   if(!strcasecmp(word[2],"bigrainbow")) {
+     WasValid = 1;
      xchat_commandf(ph, "spark x5font @rr01 %s", word_eol[3]);
+   }
+   if(!strcasecmp(word[2],"bigtext")) {
+     WasValid = 1;
+     xchat_commandf(ph, "spark x5font @0100 %s", word_eol[3]);
+   }
 
    if(!strcasecmp(word[2],"normalsay")) {
+     WasValid = 1;
      if(SayHook != NULL) {
        xchat_unhook(ph, SayHook);
        xchat_commandf(ph, "say %s", word_eol[3]);
@@ -2077,6 +2332,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        xchat_commandf(ph, "say %s", word_eol[3]);
    }
    if(!strcasecmp(word[2],"normalme")) {
+     WasValid = 1;
      if(MeHook != NULL) {
        xchat_unhook(ph, MeHook);
        xchat_commandf(ph, "me %s", word_eol[3]);
@@ -2087,6 +2343,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"pestersay")) {
+     WasValid = 1;
      char *Poke = Buffer;
      const char *Peek = xchat_get_info(ph, "nick");
      *(Poke++) = toupper(*(Peek++));
@@ -2098,13 +2355,18 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      *Poke = 0;
      xchat_commandf(ph, "say <c=%s>%s: %s</c>", PesterchumColor, Buffer, word_eol[3]);
    }
-   if(!strcasecmp(word[2],"pestercolor"))
+   if(!strcasecmp(word[2],"pestercolor")) {
+     WasValid = 1;
      xchat_commandf(ph, "spark silentset Pesterchum Color %s", word_eol[3]);
+   }
 
-   if(!strcasecmp(word[2],"pesterchanhook"))
+   if(!strcasecmp(word[2],"pesterchanhook")) {
+     WasValid = 1;
      xchat_commandf(ph, "spark silentset Pesterchum ChannelCommand %s", word_eol[3]);
+   }
 
    if(!strcasecmp(word[2],"sayhook") || !strcasecmp(word[2],"sayhooknospace")) {
+     WasValid = 1;
      SayHookSpace = 1;
      if(!strcasecmp(word[2],"sayhooknospace"))
        SayHookSpace = 0;
@@ -2143,6 +2405,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"mehook")) {
+     WasValid = 1;
      if(word_eol[3]!=NULL) {
        if(!strcasecmp(word[3],"off")) {
          strcpy(MeHookCommand,"");
@@ -2156,6 +2419,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"thou")) {
+     WasValid = 1;
      const char *Word1[] = {"artless", "bawdy", "beslubbering", "bootless", "churlish", "cockered", "clouted", "craven", "currish", "dankish", "dissembling", "droning", "errant", "fawning", "fobbing", "froward", "frothy", "gleeking", "goatish", "gorbellied", "impertinent", "infectious", "jarring", "loggerheaded", "lumpish", "mammering", "mangled", "mewling", "paunchy", "pribbling", "puking", "puny", "qualling", "rank", "reeky", "roguish", "ruttish", "saucy", "spleeny", "spongy", "surly", "tottering", "unmuzzled", "vain", "venomed", "villainous", "warped", "wayward", "weedy", "yeasty",NULL};
      const char *Word2[] = {"base-courted", "bat-fowling", "beef-witted", "beetle-headed", "boil-brained", "clapper-clawed", "clay-brained", "common-kissing", "crook-pated", "dismal-dreaming", "dizzy-eyed", "doghearted", "dread-bolted", "earth-vexing", "elf-skinned", "fat-kidneyed", "fen-sucked", "flap-mouthed", "fly-bitten", "folly-fallen", "fool-born", "full-gorged", "guts-griping", "half-faced", "hasty-witted", "hedge-born", "hell-hated", "idle-headed", "ill-breeding", "ill-nurtured", "knotty-pated", "milk-livered", "motley-minded", "onion-eyed", "plume-plucked", "pottle-deep", "pox-marked", "reeling-ripe", "rough-hen", "rude-growing", "rump-fed", "sheep-biting", "spur-galled", "swag-bellied", "tardy-gaited", "tickle-brained", "toad-spotted", "urchin-snouted", "weather-bitten",NULL};
      const char *Word3[] = {"apple-john", "baggage", "barnacle", "bladder", "boar-pig", "bugbear", "bum-bailey", "canker-blossom", "clack-dick", "clotpole", "coxcomb", "codpiece", "death-token", "dewberry", "flap-dragon", "flax-wench", "flirt-gill", "foot-licker", "fustilarian", "giglet", "gudgeon", "haggard", "harpy", "hedge-pig", "horn-beast", "hugger-bugger", "joithead", "lewdster", "lout", "maggot-pie", "malt-worm", "mammet", "measle", "minnow", "miscreant", "moldwarp", "mumble-news", "nut-hook", "pigeon-egg", "pignut", "puttock", "pumpion", "ratsbane", "scut", "skainsmate", "strumpet", "varlot", "vassal", "wheyface", "wagtail",NULL};
@@ -2170,6 +2434,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"rot13")) {
+     WasValid = 1;
      strcpy(Buffer,word_eol[3]);
      char offset;
      for(i=0;Buffer[i];i++) {
@@ -2188,6 +2453,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"cmdstack") || !strcasecmp(word[2],"pipe")) {
+     WasValid = 1;
      strcpy(CmdStackText, word[3]);
      CmdStackPtr = CmdStackText;
      strcpy(Buffer, CmdStackText);
@@ -2200,6 +2466,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"multicmd")) {
+     WasValid = 1;
      char *Ptr = word[3];
      while(1) {
        strcpy(Buffer, Ptr);
@@ -2217,6 +2484,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"SparkEncrypt1")) {
+     WasValid = 1;
      unsigned char Key1 = rand()&255;
      unsigned char kA = (Key1 & 192) >> 6;
 //   unsigned char kB = (Key1 & 48) >> 4;
@@ -2255,6 +2523,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"2sprintf") || !strcasecmp(word[2],"2slashf") || !strcasecmp(word[2],"2slashfi")) {
+     WasValid = 1;
      char TinyBuf[32];
      char *Poke = Buffer;
      char *Peek = word_eol[3];
@@ -2290,23 +2559,32 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"atloop")) { // atloop [format] [action] [text]
+     WasValid = 1;
      if(!AttributeLoop(Buffer, word_eol[5], word[3])) {
        xchat_commandf(ph, "%s %s", word[4], Buffer);
      } else {
        xchat_printf(ph, "%sBad attribute loop?\n",SparklesUser);
      }
    }
-   if(!strcasecmp(word[2],"atloops"))
+   if(!strcasecmp(word[2],"atloops")) {
+     WasValid = 1;
      xchat_commandf(ph,"spark atloop %s say %s", SafeGet(word[3],""), SafeGet(word_eol[4],""));
-   if(!strcasecmp(word[2],"atloopm"))
+   }
+   if(!strcasecmp(word[2],"atloopm")) {
+     WasValid = 1;
      xchat_commandf(ph,"spark atloop %s me %s", SafeGet(word[3],""), SafeGet(word_eol[4],""));
-   if(!strcasecmp(word[2],"atloopi"))
+   }
+   if(!strcasecmp(word[2],"atloopi")) {
+     WasValid = 1;
      xchat_commandf(ph,"spark atloop %s settext %s", SafeGet(word[3],""), SafeGet(word_eol[4],""));
-   if(!strcasecmp(word[2],"unsettab"))
+   }
+   if(!strcasecmp(word[2],"unsettab")) {
+     WasValid = 1;
      xchat_commandf(ph,"settab %s", SafeGet(xchat_get_info(ph, "channel"),""));
-
+   }
 
    if(!strcasecmp(word[2],"backwards")) {
+     WasValid = 1;
      char *Poke = Buffer;
      for(i=strlen(word_eol[3])-1;i!=-1;i--)
        *(Poke++) = word_eol[3][i];
@@ -2314,28 +2592,31 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      xchat_commandf(ph, "say %s", Buffer);
    }
    if(!strcasecmp(word[2],"backwords")) {
+     WasValid = 1;
      Backwords(word_eol[3], Buffer);
      xchat_commandf(ph, "say %s", Buffer);
    }
 
    if(!strcasecmp(word[2],"grabtopic")) {
-       GrabbingTopic = 1;
-       xchat_commandf(ph, "topic");
+     WasValid = 1;
+     GrabbingTopic = 1;
+     xchat_command(ph, "topic");
    }
 
    if(!strcasecmp(word[2],"spawn") || !strcasecmp(word[2],"spawnquiet")) {
-    // /spark(1) spawn(2) X(3) units(4) Command(5)
-    int Slot;
-    if(!strcasecmp(word[3],"clear")) {
-      for(Slot=0;Slot<16;Slot++)
-        if(SpawnHook[Slot]!=NULL) {
-          struct SpawnInfo *FreeMe = xchat_unhook(ph, SpawnHook[Slot]);
-          if(FreeMe != NULL)
-            free(FreeMe);
-          SpawnHook[Slot]=NULL;
-        }
-      if(strcasecmp(word[2],"spawnquiet"))
-        xchat_printf(ph, "%sSpawn list cleared",SparklesUser);
+     WasValid = 1;
+     // /spark(1) spawn(2) X(3) units(4) Command(5)
+     int Slot;
+     if(!strcasecmp(word[3],"clear")) {
+       for(Slot=0;Slot<16;Slot++)
+         if(SpawnHook[Slot]!=NULL) {
+           struct SpawnInfo *FreeMe = xchat_unhook(ph, SpawnHook[Slot]);
+           if(FreeMe != NULL)
+             free(FreeMe);
+           SpawnHook[Slot]=NULL;
+         }
+       if(strcasecmp(word[2],"spawnquiet"))
+         xchat_printf(ph, "%sSpawn list cleared",SparklesUser);
     } else {
       double Time = strtod(word[3], NULL);
       switch(word[4][0]) {
@@ -2370,36 +2651,47 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"rainbow") || !strcasecmp(word[2],"rainbowt")) {
+     WasValid = 1;
      char *Poke = Buffer;
-     for(i=0,j=0;word_eol[3][i];i++) {
-       if(isgraph2(word_eol[3][i])) {
-         *(Poke++) = 0x03;
-         *(Poke++) = Rainbow[j][0];
-         *(Poke++) = Rainbow[j++][1];
-         if(j == 5) j = 0;
-       }
-       *(Poke++) = word_eol[3][i];
-     }
-     if(strcasecmp(word[2],"rainbowt"))
-       *Poke = 0;
-     else {
-       *(Poke++) = 0x0f;
-       *Poke = 0;
-     }
-     xchat_commandf(ph, "say %s", Buffer);
+      for(i=0,j=0;word_eol[3][i];i++) {
+        if(isgraph2(word_eol[3][i])) {
+          *(Poke++) = 0x03;
+          *(Poke++) = Rainbow[j][0];
+          *(Poke++) = Rainbow[j++][1];
+          if(j == 5) j = 0;
+        }
+        *(Poke++) = word_eol[3][i];
+      }
+      if(strcasecmp(word[2],"rainbowt"))
+        *Poke = 0;
+      else {
+        *(Poke++) = 0x0f;
+        *Poke = 0;
+      }
+      xchat_commandf(ph, "say %s", Buffer);
    }
-   if(!strcasecmp(word[2],"hstroll"))
+   if(!strcasecmp(word[2],"hstroll")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", TrollFilter(Buffer, word_eol[4], word[3]));
-   if(!strcasecmp(word[2],"scarletsay"))
+   }
+   if(!strcasecmp(word[2],"scarletsay")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", ScarletFilter(Buffer, word_eol[3]));
-   if(!strcasecmp(word[2],"sellysay"))
+   }
+   if(!strcasecmp(word[2],"sellysay")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", SellyFilter(Buffer, word_eol[3], 0));
-   if(!strcasecmp(word[2],"sellysay2"))
+   }
+   if(!strcasecmp(word[2],"sellysay2")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", SellyFilter(Buffer, word_eol[3], 1));
-   if(!strcasecmp(word[2],"replwords"))
+   }
+   if(!strcasecmp(word[2],"replwords")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", CustomReplace(Buffer, word_eol[4], word[3]));
-
+   }
    if(!strcasecmp(word[2],"replchars") || !strcasecmp(word[2],"replcharsi") || !strcasecmp(word[2],"replcharsim")) {
+      WasValid = 1;
       if(strlen(word[3])&1) {
         xchat_printf(ph, "The list given to replchars must be of an even length\n");
         return XCHAT_EAT_ALL;
@@ -2429,6 +2721,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"onesayhook") || !strcasecmp(word[2],"me2cmd") || !strcasecmp(word[2],"say2cmd")) {
+     WasValid = 1;
      strcpy(OneSayHook, word[3]);
      UseOneSayHook = 1;
      xchat_command(ph, word_eol[4]);
@@ -2436,16 +2729,20 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"me2say")) {
+     WasValid = 1;
      strcpy(OneSayHook, "say");
      UseOneSayHook = 1;
      xchat_command(ph, word_eol[3]);
      UseOneSayHook = 0;
    }
 
-   if(!strcasecmp(word[2],"hideset"))
+   if(!strcasecmp(word[2],"hideset")) {
+     WasValid = 1;
      xchat_commandf(ph, "spark hidecmd set %s");
+   }
 
    if(!strcasecmp(word[2],"hidecmd")) {
+     WasValid = 1;
      xchat_context *Old = xchat_get_context(ph);
      xchat_command(ph, "query $");
      xchat_context *New = xchat_find_context(ph, NULL, "$");
@@ -2459,6 +2756,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"space2newline")) {
+     WasValid = 1;
      char *Ptr = word_eol[3];
      while(1) {
        strcpy(Buffer, Ptr);
@@ -2475,7 +2773,33 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
 
+   if(!strcasecmp(word[2],"spaces2newline")) {
+     WasValid = 1;
+     int SpaceCount = 0;
+     int WordsPerLine = strtol(word[3], NULL, 10);
+     if(WordsPerLine < 1)
+       return XCHAT_EAT_ALL;
+     strcpy(Buffer, word_eol[4]);
+     char *Ptr = Buffer;
+     char *Send = Ptr;
+     while(*Ptr) {
+       if(*Ptr == ' ') {
+         SpaceCount++;
+         if(SpaceCount == WordsPerLine) {
+           *Ptr = 0;
+           xchat_commandf(ph, "say %s", Send);
+           Send = Ptr+1;
+           SpaceCount = 0;
+         }
+       }
+       Ptr++;
+     }
+     if(*Send)
+       xchat_commandf(ph, "say %s", Send);
+   }
+
    if(!strcasecmp(word[2],"repeatcmd")) { // /spark repeatcmd times command
+     WasValid = 1;
      int i, Times=strtol(word[3],NULL,10);
      char *Cmd = word_eol[4];
      if(isdigit(word[4][0])) {
@@ -2489,6 +2813,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
          xchat_commandf(ph, "%s", Cmd);
    }
    if(!strcasecmp(word[2],"rainbow4") || !strcasecmp(word[2],"rainbow4t")) { // 04 08 09 12 13
+     WasValid = 1;
      char *Poke = Buffer;
      for(i=0,j=0;word_eol[3][i];i++) {
        if(isgraph2(word_eol[3][i]) && !(i&3)) {
@@ -2500,14 +2825,12 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        *(Poke++) = word_eol[3][i];
      }
      if(strcasecmp(word[2],"rainbow4t"))
-       *Poke = 0;
-     else {
        *(Poke++) = 0x0f;
-       *Poke = 0;
-     }
+     *Poke = 0;
      xchat_commandf(ph, "say %s", Buffer);
    }
    if(!strcasecmp(word[2],"bouncycaps")) {
+     WasValid = 1;
      strcpy(Buffer,word_eol[3]);
      Buffer[0]=toupper(Buffer[i]);
      for(i=0;Buffer[i];i++)
@@ -2516,22 +2839,26 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      xchat_commandf(ph, "say %s", Buffer);
    }
    if(!strcasecmp(word[2],"shufflechar")) { // /spark shufflechar Corruption Text
+     WasValid = 1;
      ShuffleChars(Buffer, word_eol[4],  strtol(word[3],NULL,10),0);
      xchat_commandf(ph, "say %s", Buffer);
    }
    if(!strcasecmp(word[2],"allcaps")) {
+     WasValid = 1;
      strcpy(Buffer,word_eol[3]);
      for(i=0;Buffer[i];i++)
        Buffer[i]=toupper(Buffer[i]);
      xchat_commandf(ph, "say %s", Buffer);
    }
    if(!strcasecmp(word[2],"nocaps")) {
+     WasValid = 1;
      strcpy(Buffer,word_eol[3]);
      for(i=0;Buffer[i];i++)
        Buffer[i]=tolower(Buffer[i]);
      xchat_commandf(ph, "say %s", Buffer);
    }
    if(!strcasecmp(word[2],"altcaps")) {
+     WasValid = 1;
      strcpy(Buffer,word_eol[3]);
      for(i=0;Buffer[i];i++)
        if(i&1)
@@ -2540,11 +2867,16 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
          Buffer[i]=tolower(Buffer[i]);
      xchat_commandf(ph, "say %s", Buffer);
    }
-   if(!strcasecmp(word[2],"acidtext"))
+   if(!strcasecmp(word[2],"acidtext")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", AcidText(Buffer, word_eol[3]));
-   if(!strcasecmp(word[2],"accents"))
+   }
+   if(!strcasecmp(word[2],"accents")) {
+     WasValid = 1;
      xchat_commandf(ph, "say %s", AccentFilter(Buffer, word_eol[3]));
+   }
    if(!strcasecmp(word[2],"randcaps") || !strcasecmp(word[2],"rainbowcaps")) {
+     WasValid = 1;
      strcpy(Buffer,word_eol[3]);
      for(i=0;Buffer[i];i++)
        if(rand()&1)
@@ -2557,6 +2889,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        xchat_commandf(ph, "say %s", Buffer);
    }
    if(!strcasecmp(word[2],"run")) { // take a file and execute every line of it as a command
+      WasValid = 1;
       int Quiet=0;
       if(word[4] != NULL && !strcasecmp(word[4],"quiet"))
         Quiet=1;
@@ -2588,7 +2921,116 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
 
+   if(!strcasecmp(word[2],"onevent")){
+     WasValid = 1;
+     if(!strcasecmp(word[3], "list")) {
+       for(i=0;i<ONEVENTS_SIZE;i++)
+         if(OnEventInfos[i]) {
+           ListOnEvent(Buffer, OnEventInfos[i]);
+           xchat_print(ph, Buffer);
+         }
+     } else if(!strcasecmp(word[3], "renumber")) {
+       for(i=0;i<ONEVENTS_SIZE-1;i++) {
+         if(OnEventInfos[i])
+           continue;
+         for(j=i+1;j<ONEVENTS_SIZE;j++)
+           if(OnEventInfos[j]) {
+             OnEventInfos[i] = OnEventInfos[j];
+             OnEventInfos[j] = NULL;
+             OnEventInfos[i]->Slot = i;
+           }
+       }
+       xchat_print(ph, "Renumbered the OnEvent list");
+     } else if(!strcasecmp(word[3], "delete")) {
+       if(!strcasecmp(word[4], "all")) {
+         for(i=0;i<ONEVENTS_SIZE;i++)
+           if(OnEventInfos[i]) {
+             xchat_unhook(ph, OnEventInfos[i]->Hook);
+             free(OnEventInfos[i]);
+             OnEventInfos[i] = NULL;
+           }
+       } else {
+         for(i=4;word[i][0];i++) {
+           j = strtol(word[i], NULL, 10);
+           if(OnEventInfos[j]) {
+             xchat_unhook(ph, OnEventInfos[j]->Hook);
+             free(OnEventInfos[j]);
+             OnEventInfos[j] = NULL;
+             if(!QuietOnEvents)
+               xchat_printf(ph, "Deleting OnEvent item %i", j);
+           }
+         }
+       }
+     } else if(!strcasecmp(word[3], "disable")) {
+       for(i=4;word[i][0];i++) {
+         j = strtol(word[i], NULL, 10);
+         if(OnEventInfos[j]) {
+           OnEventInfos[j]->Flags &= ~OEF_ENABLED;
+           if(!QuietOnEvents)
+             xchat_printf(ph, "Disabling OnEvent item %i", i);
+         }
+       }
+     } else if(!strcasecmp(word[3], "enable")) {
+       for(i=4;word[i][0];i++) {
+         j = strtol(word[i], NULL, 10);
+         if(OnEventInfos[j]) {
+           OnEventInfos[j]->Flags |= OEF_ENABLED;
+           if(!QuietOnEvents)
+             xchat_printf(ph, "Enabling OnEvent item %i", i);
+         }
+       }
+     } else if(!strcasecmp(word[3], "set")) {
+       j = -1;
+       if(isdigit(word[4][0])) // user selected a specific slot
+         j = strtol(word[4], NULL, 10);
+       if(j == -1) {
+         for(j=0;j<ONEVENTS_SIZE;j++)
+           if(!OnEventInfos[j])
+             break;
+         if(j==ONEVENTS_SIZE) {
+           xchat_print(ph, "No free OnEvent slots");
+           return XCHAT_EAT_ALL;
+         }
+       }
+       if(OnEventInfos[j]) {
+         xchat_unhook(ph, OnEventInfos[j]->Hook);
+         free(OnEventInfos[j]);
+       }
+       OnEventInfos[j] = (struct OnEventInfo*)malloc(sizeof(struct OnEventInfo));
+       if(!OnEventInfos[j])
+         return XCHAT_EAT_ALL;
+       memset(OnEventInfos[j], 0, sizeof(struct OnEventInfo));
+       strlcpy(OnEventInfos[j]->EventName, word[5], 32);
+       OnEventInfos[j]->Slot = j;
+       OnEventInfos[j]->Flags = OEF_ENABLED;
+       int High = 0;
+       for(k=0;word[4][k];k++) {
+         switch(word[4][k]) {
+           case 't':
+             OnEventInfos[j]->Flags |= OEF_TEMPORARY;
+             break;
+           case 'd':
+             OnEventInfos[j]->Flags &= ~OEF_ENABLED;
+             break;
+           case 's':
+             OnEventInfos[j]->Flags |= OEF_SAVE;
+             break;
+           case 'h':
+             OnEventInfos[j]->Flags |= OEF_HIGH_PRIORITY;
+             High = 1;
+             break;
+         }
+       }
+       for(k=6;isdigit(word[k][0]);k++)
+         strlcpy(OnEventInfos[j]->Match[k-6], word[6], 80);
+       strlcpy(OnEventInfos[j]->Response, word_eol[k], 500);
+       OnEventInfos[j]->Hook = xchat_hook_print(ph, word[5], High?XCHAT_PRI_HIGH:XCHAT_PRI_NORM, on_event_cb, OnEventInfos[j]); 
+       xchat_printf(ph, "Set OnEvent slot %i", j);
+     }
+   }
+
    if(!strcasecmp(word[2],"contextstack")){
+     WasValid = 1;
      if(!strcasecmp(word[3],"push"))
        ContextStack[ContextStackSP++] = xchat_get_context(ph);
      else if(!strcasecmp(word[3],"pop"))
@@ -2600,6 +3042,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"cmdallchan")){
+     WasValid = 1;
 	 xchat_list *list = xchat_list_get(ph, "channels");
      int DoInChannels = 0;
      int DoInQueries = 0;
@@ -2644,10 +3087,13 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        xchat_list_free(ph, list);
      }
    }
-   if(!strcasecmp(word[2],"chanclean"))
+   if(!strcasecmp(word[2],"chanclean")) {
+     WasValid = 1;
      xchat_commandf(ph, "spark cmdallchan %sp close", word[3]);
+   }
 
    if(!strcasecmp(word[2],"SendModeSelect")){
+     WasValid = 1;
      xchat_list *list;
      int Users = 0;
      const char *UserList[100];
@@ -2668,6 +3114,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"SendModePrefix")){ // /spark sendmodeprefix +o prefix exclude
+     WasValid = 1;
      xchat_list *list;
      int Users = 0;
      int Exclude;
@@ -2699,6 +3146,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"pusers")){ // prefix of users in local context
+     WasValid = 1;
      xchat_list *list;
      int Users = 0;
      list = xchat_list_get(ph, "users");
@@ -2712,11 +3160,13 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"get_info")) { // for debugging and curiosity
+      WasValid = 1;
       if(word[3] != NULL)
         xchat_printf(ph,"%sxchat_get_info(ph, \"%s\") returns \"%s\";\n", SparklesUser,
         word[3], SafeGet(xchat_get_info(ph, word[3]),NULL));
    }
    if(!strcasecmp(word[2],"get_prefs")) { // for debugging and curiosity
+      WasValid = 1;
       int Int;
       const char *Str;
       switch(xchat_get_prefs (ph, word[3], &Str, &Int)) {
@@ -2736,14 +3186,18 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"randtype")) {
+     WasValid = 1;
      RandomType = strtol(word[3], NULL, 10);
      if(word[4] == NULL || strcasecmp(word[4],"quiet"))
        xchat_printf(ph, "%sRandom number type set to %i \n", SparklesUser, RandomType);
    }
-   if(!strcasecmp(word[2],"randnum"))
+   if(!strcasecmp(word[2],"randnum")) {
+     WasValid = 1;
      xchat_printf(ph, "%sRandom number: %i \n", SparklesUser, rand2(strtol(word[3], NULL, 10)));
+   }
 
    if(!strcasecmp(word[2],"pesterchum")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset Pesterchum Disabled on");
        xchat_printf(ph,"%sPesterchum mode OFF",SparklesUser);
@@ -2754,6 +3208,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
    if(!strcasecmp(word[2],"prettyjanus")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset PrettyJanus Disabled on");
        xchat_printf(ph,"%sPretty Janus OFF",SparklesUser);
@@ -2764,6 +3219,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
    if(!strcasecmp(word[2],"invitejoin")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset Automatic JoinOnInvite on");
        xchat_printf(ph,"%sJoin-on-invite enabled",SparklesUser);
@@ -2774,6 +3230,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
    if(!strcasecmp(word[2],"rejoin")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset Automatic RejoinOnKick on");
        xchat_printf(ph,"%sRejoin-on-kick enabled",SparklesUser);
@@ -2784,6 +3241,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
    if(!strcasecmp(word[2],"autoident")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset Automatic DisableAutoIdent on");
        xchat_printf(ph,"%sAuto-ident disabled",SparklesUser);
@@ -2795,6 +3253,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"autoghost")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset Automatic DisableAutoGhost on");
        xchat_printf(ph,"%sAuto-ghost disabled",SparklesUser);
@@ -2806,6 +3265,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"autonickdeblue")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset Automatic DisableAutoNickColorReset on");
        xchat_printf(ph,"%sAuto-nick color reset disabled",SparklesUser);
@@ -2817,6 +3277,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"plusjfix")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        DisablePlusJFix = 1; xchat_printf(ph,"%s+J fix disabled",SparklesUser);
      }
@@ -2826,6 +3287,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"activity2focus")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        xchat_commandf(ph, "spark silentset Automatic Activity2Focus on");
        xchat_printf(ph,"%sActivity-to-Focus enabled",SparklesUser);
@@ -2837,6 +3299,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"eathighlights")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"on")) {
        EatHighlights = 1; xchat_printf(ph,"%sHighlights will now be eaten",SparklesUser);
      }
@@ -2846,6 +3309,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"invite")) {
+     WasValid = 1;
      if(!strcasecmp(word[3],"eat")) {
        EatInvites = 1;  xchat_printf(ph,"%sInvites will now be eaten",SparklesUser);
      }
@@ -2854,6 +3318,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
    if(!strcasecmp(word[2],"unsettabs")) { // unset all tabs
+     WasValid = 1;
      xchat_list *list = xchat_list_get(ph, "channels");
      if(list) {
        while(xchat_list_next(ph, list)) {
@@ -2863,7 +3328,20 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        xchat_list_free(ph, list);
      }
    }
-   if(!strcasecmp(word[2],"rchan2")) { // redirect to channel
+   if(!strcasecmp(word[2],"rchan")) { // with preserved context
+     WasValid = 1;
+     xchat_command(ph, "spark contextstack push");
+     xchat_commandf(ph, "spark rchanc %s", word_eol[3]);
+     xchat_command(ph, "spark contextstack pop");
+   }
+   if(!strcasecmp(word[2],"rchan2")) { // with preserved context
+     WasValid = 1;
+     xchat_command(ph, "spark contextstack push");
+     xchat_commandf(ph, "spark rchan2c %s", word_eol[3]);
+     xchat_command(ph, "spark contextstack pop");
+   }
+   if(!strcasecmp(word[2],"rchan2c")) { // redirect to channel
+     WasValid = 1;
      xchat_list *list = xchat_list_get(ph, "channels");
      if(list) {
        while(xchat_list_next(ph, list)) {
@@ -2875,12 +3353,14 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        xchat_list_free(ph, list);
      }
    }
-   if(!strcasecmp(word[2],"rchan")) { // redirect to channel (on same network)
+   if(!strcasecmp(word[2],"rchanc")) { // redirect to channel (on same network)
+     WasValid = 1;
      xchat_context *Go = xchat_find_context(ph, NULL, word[3]);
      if( xchat_set_context(ph, Go))
        xchat_command(ph, word_eol[4]);
    }
    if(!strcasecmp(word[2],"mrchan")) {
+     WasValid = 1;
      char *Ptr = word[3];
      while(1) {
        strcpy(Buffer, Ptr);
@@ -2902,9 +3382,13 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"help")) { // get help
-     xchat_print(ph,"http://bin.smwcentral.net/u/1780/SparklesGuide.txt");
+     WasValid = 1;
+     xchat_print(ph,"Read https://github.com/NovaSquirrel/SparklesPlugin/blob/master/README.md");
    }
+/* WHY DID I EVEN TRY TO IMPLEMENT THIS
+   AND WHY DIDN'T I JUST MAKE IT READ WHOIS RESULTS
    if(!strcasecmp(word[2],"mutualchan")) {
+     WasValid = 1;
      strcpy(Buffer,"");
      if(!strcasecmp(word[3],"")) {
         // use current channel
@@ -2928,7 +3412,9 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
        }
      }
    }
+*/
    if(!strcasecmp(word[2],"chancolorset")) { // set all channels to one color
+     WasValid = 1;
      xchat_list *list = xchat_list_get(ph, "channels");
      if(list) {
         while(xchat_list_next(ph, list)) {
@@ -2940,6 +3426,7 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
    }
 
    if(!strcasecmp(word[2],"chancolorset2")) { // for one server only
+     WasValid = 1;
      const char *Server = xchat_get_info(ph, "server");
      if(Server != NULL) {
        xchat_list *list = xchat_list_get(ph, "channels");
@@ -2955,6 +3442,8 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      }
    }
 
+   if(!WasValid)
+     xchat_printf(ph, "\"%s\" doesn't seem to be a Sparkles command\n", word[2]);
    return XCHAT_EAT_ALL;
 }
 
@@ -3021,7 +3510,7 @@ static int getnotice_cb(char *word[], void *userdata) {
    return XCHAT_EAT_NONE;
 }
 static int nickclash_cb(char *word[], void *userdata) {
-  if(((unsigned)time(NULL)) < (StartingTime+6))
+  if(((unsigned)time(NULL)) < (GhostDelayTime+9))
     return XCHAT_EAT_NONE;
   if(!DisableAutoGhost) {
     xchat_commandf(ph,"spark spawnquiet 2.2 s spark ghost2 %s", word[1]);
@@ -3253,14 +3742,21 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
    xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/No pretty janus\" \"spark prettyjanus on\" \"spark prettyjanus off\"");
    xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/Disable highlights\" \"spark set Automatic DisableHighlights on\" \"spark set Automatic DisableHighlights off\"");
    xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/Character counter\" \"spark set Automatic CharCounter on\" \"spark set Automatic CharCounter off\"");
+   xchat_commandf(ph,"MENU -t0 ADD \"Sparkles/Settings/PM Alerts\" \"spark set Automatic PMAlerts on\" \"spark set Automatic PMAlerts off\"");
 
    xchat_commandf(ph,"MENU ADD \"Sparkles/Cram\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Cram/Slash\" \"spark cram\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Cram/No slash\" \"spark cram noslash\"");
 
-   xchat_commandf(ph,"MENU ADD \"Sparkles/XChat\"");
-   xchat_commandf(ph,"MENU ADD \"Sparkles/XChat/Disable beeps\" \"set input_filter_beep on\"");
-   xchat_commandf(ph,"MENU ADD \"Sparkles/XChat/Enable beeps\" \"set input_filter_beep off\"");
+   #ifdef HEXCHAT_PLUGIN_H
+     xchat_commandf(ph,"MENU ADD \"Sparkles/HexChat\"");
+     xchat_commandf(ph,"MENU ADD \"Sparkles/HexChat/Disable beeps\" \"set input_filter_beep on\"");
+     xchat_commandf(ph,"MENU ADD \"Sparkles/HexChat/Enable beeps\" \"set input_filter_beep off\"");
+   #else
+     xchat_commandf(ph,"MENU ADD \"Sparkles/XChat\"");
+     xchat_commandf(ph,"MENU ADD \"Sparkles/XChat/Disable beeps\" \"set input_filter_beep on\"");
+     xchat_commandf(ph,"MENU ADD \"Sparkles/XChat/Enable beeps\" \"set input_filter_beep off\"");
+   #endif
 
    xchat_commandf(ph,"MENU ADD \"Sparkles/Reset tab colors\" \"spark chancolorset 0\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Remove sayhook\" \"spark sayhook off\"");
@@ -3273,6 +3769,8 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
 
    /* make hooks */
    xchat_hook_command(ph, "spark", XCHAT_PRI_NORM, Spark_cb, "For info: /spark help", 0);
+
+   memset(OnEventInfos, 0, sizeof(OnEventInfos));
    #if ENABLE_NSFW_CONTENT
      xchat_hook_command(ph, "yiff", XCHAT_PRI_NORM, yiff_cb, "Usage: /yiff [nick]", 0);
    #endif
@@ -3305,8 +3803,13 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
    xchat_hook_print(ph, "Your Message", XCHAT_PRI_NORM, charcounter_cb, NULL); 
    xchat_hook_print(ph, "Your Action",  XCHAT_PRI_NORM, charcounter_cb, NULL); 
    xchat_hook_print(ph, "Focus Tab",    XCHAT_PRI_NORM, charcounter_cb, NULL); 
+
+   xchat_hook_print(ph, "Private Action",  XCHAT_PRI_NORM, privatemessage_cb, NULL); 
+   xchat_hook_print(ph, "Private Message", XCHAT_PRI_NORM, privatemessage_cb, NULL); 
+   xchat_hook_print(ph, "Private Action to Dialog",  XCHAT_PRI_NORM, privatemessage_cb, NULL); 
+   xchat_hook_print(ph, "Private Message to Dialog", XCHAT_PRI_NORM, privatemessage_cb, NULL); 
    srand((unsigned)time(NULL));
-   StartingTime = (unsigned)time(NULL);
+   GhostDelayTime = (unsigned)time(NULL);
 
    sprintf(ConfigFilePath, "%s/Sparkles/sparkles.ini", xchat_get_info(ph, "xchatdirfs"));
    ParseINI(fopen(ConfigFilePath,"rb"), INIConfigHandler);
