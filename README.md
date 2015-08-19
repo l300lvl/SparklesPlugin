@@ -567,6 +567,7 @@ If you don't have any flags you can use "." in place of any flags.
 The response can use $1, $2, $3 etc to refer to the text event parameters, or $n or $c for your nick or the channel name. $$ comes out as a $.
 
 "DeleteEvent" is accepted as a response and it will delete the event.
+"NoHighlight" when paired with "Channel Msg Hilight" or "Channel Action Hilight" will replace the message with a non-highlighted version.
 
 =======
 
@@ -589,6 +590,11 @@ Shakespeare insult
 `/spark saveprefs`
 
 Saves preferences to a .ini file
+
+### recentclosed
+`/spark recentclosed`
+
+Lists the three most recent tabs you've closed
 
 ### randnum
 `/spark randnum Limit`

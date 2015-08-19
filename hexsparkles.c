@@ -21,7 +21,7 @@
 
 #define PNAME "Nova's Sparkles"
 #define PDESC "Mix of annoying/powerful/useful stuff"
-#define PVERSION "1.1"
+#define PVERSION "1.1.1"
 #define USE_SPARKLES_USER 0
 #define ENABLE_NSFW_CONTENT 1
 #define PESTERCHUM_NETWORK "Pesterchum"
@@ -102,6 +102,7 @@ static const char SparkEncryptPrefix[] = {2,0x16,0x1f,0x16,0x16,0x0f,2,3,'0','0'
 static char SparklesUser[64];
 
 static char *Rainbow[]={"04","08","09","12","13"};
+static char ClosedList[3][64] = {"","",""};
 
 static void INIConfigHandler(const char *Group, const char *Item, const char *Value);
 static int ParseINI(FILE *File, void (*Handler)(const char *Group, const char *Item, const char *Value));
@@ -122,7 +123,7 @@ struct OnEventInfo {
   hexchat_hook *Hook;
 };
 
-#define ONEVENTS_SIZE 30
+#define ONEVENTS_SIZE 100
 struct OnEventInfo *OnEventInfos[ONEVENTS_SIZE];
 
 enum ConfigTypes {
@@ -391,6 +392,13 @@ static int on_event_cb(char *word[], void *userdata) {
 
   if(!strcasecmp(Buffer, "DeleteEvent"))
     return HEXCHAT_EAT_ALL;
+  if(!strcasecmp(Buffer, "NoHilight") || !strcasecmp(Buffer, "NoHighlight")) {
+    if(!strcasecmp(Info->EventName, "Channel Msg Hilight"))
+      hexchat_emit_print(ph, "Channel Message", word[1], word[2], word[3], word[4], NULL);
+    else if(!strcasecmp(Info->EventName, "Channel Action Hilight"))
+      hexchat_emit_print(ph, "Channel Action", word[1], word[2], word[3], word[4], NULL);
+    return HEXCHAT_EAT_ALL;
+  }
 
   hexchat_command(ph, Buffer);
   if(Info->Flags & OEF_TEMPORARY) {
@@ -2011,6 +2019,27 @@ static int TrapActionPost_cb(char *word[], char *word_eol[], void *userdata) {
     MeHook = hexchat_hook_command(ph, "me", HEXCHAT_PRI_NORM, TrapActionPost_cb, NULL, 0);
     return HEXCHAT_EAT_ALL;
   }
+  else if(CmdStackPtr != NULL) {
+    char Buffer[512];
+    strcpy(Buffer, CmdStackPtr);
+    char *A = strstr(Buffer, "||");
+    if(A) {
+      *A = 0;
+      CmdStackPtr=A+2;
+      char *OldPtr = CmdStackPtr;
+      hexchat_commandf(ph, "%s %s", Buffer, word_eol[1]);
+      if(OldPtr == CmdStackPtr) {
+        hexchat_printf(ph, "\"%s\" in cmdstack did not result in /say", Buffer);
+        CmdStackPtr = NULL;
+      }
+      return HEXCHAT_EAT_ALL;
+    }
+    else {
+      CmdStackPtr=NULL;
+      hexchat_commandf(ph, "%s %s", Buffer, word_eol[1]);
+      return HEXCHAT_EAT_ALL;
+    }
+  }
   if(strcasecmp(MeHookCommand,"")) {
     if(MeHook != NULL)
       hexchat_unhook(ph, MeHook);
@@ -2022,6 +2051,13 @@ static int TrapActionPost_cb(char *word[], char *word_eol[], void *userdata) {
     hexchat_commandf(ph, "spark normalsay /me %s", word_eol[2]);
     return HEXCHAT_EAT_ALL;
   }
+  return HEXCHAT_EAT_NONE;
+}
+
+static int Close_cb(char *word[], void *userdata) {
+  strcpy(ClosedList[2], ClosedList[1]);
+  strcpy(ClosedList[1], ClosedList[0]);
+  strlcpy(ClosedList[0], hexchat_get_info(ph, "channel"), 64);
   return HEXCHAT_EAT_NONE;
 }
 
@@ -2618,6 +2654,11 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      WasValid = 1;
      Backwords(word_eol[3], Buffer);
      hexchat_commandf(ph, "say %s", Buffer);
+   }
+
+   if(!strcasecmp(word[2],"recentclosed")) {
+     WasValid = 1;
+     hexchat_printf(ph, "Recently closed tabs: %s %s %s", ClosedList[0], ClosedList[1], ClosedList[2]);
    }
 
    if(!strcasecmp(word[2],"grabtopic")) {
@@ -3824,6 +3865,7 @@ int hexchat_plugin_init(hexchat_plugin *plugin_handle,
    #endif
    SayHook = hexchat_hook_command(ph, "", HEXCHAT_PRI_NORM, TrapNormalPost_cb, NULL, 0);
    MeHook = hexchat_hook_command(ph, "me", HEXCHAT_PRI_NORM, TrapActionPost_cb, NULL, 0);
+   hexchat_hook_print(ph, "Close Context", HEXCHAT_PRI_NORM, Close_cb, NULL);
 
    hexchat_hook_print(ph, "Nick Clash",             HEXCHAT_PRI_NORM, nickclash_cb, NULL);
    hexchat_hook_print(ph, "Channel Message",       HEXCHAT_PRI_NORM, channelmessage_cb, (int)0);
