@@ -2027,7 +2027,7 @@ static int TrapActionPost_cb(char *word[], char *word_eol[], void *userdata) {
       *A = 0;
       CmdStackPtr=A+2;
       char *OldPtr = CmdStackPtr;
-      hexchat_commandf(ph, "%s %s", Buffer, word_eol[1]);
+      hexchat_commandf(ph, "%s %s", Buffer, word_eol[2]);
       if(OldPtr == CmdStackPtr) {
         hexchat_printf(ph, "\"%s\" in cmdstack did not result in /say", Buffer);
         CmdStackPtr = NULL;
