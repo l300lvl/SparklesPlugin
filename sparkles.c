@@ -26,7 +26,12 @@
 #define ENABLE_NSFW_CONTENT 1
 #define PESTERCHUM_NETWORK "Pesterchum"
 
+#ifndef HEXCHAT
 #include "xchat-plugin.h"
+#else
+#include "hexchat-plugin.h"
+#include "4hexchat.h"
+#endif
 #include <stdio.h>         // sprintf() and file access
 #include <string.h>        // compares and copies and stuff
 #include <stdarg.h>        // Adj() really needs this
@@ -46,6 +51,7 @@ static int EatInvites =  0;
 static int JoinOnInvite= 0;
 static int BeVerbose =   0;
 static int LastYiff  =  -1;
+static int HexChat = 0;
 static int DisableAutoIdent = 0;
 static int DisableAutoNickDeblue= 0;
 static int DisableAutoGhost=0;
@@ -2290,11 +2296,10 @@ static int Spark_cb(char *word[], char *word_eol[], void *userdata) {
      xchat_get_prefs(ph, "irc_logmask", &LogMask, NULL);
      const char *ReplaceWith[] = {Network, Chan, Server};
      TextInterpolate(LogPath, LogMask, '%', "ncs", ReplaceWith);
-   #ifdef HEXCHAT_PLUGIN_H
-     sprintf(Buffer, "%s/logs/%s", xchat_get_info(ph, "xchatdirfs"), LogPath);
-   #else
-     sprintf(Buffer, "%s/xchatlogs/%s", xchat_get_info(ph, "xchatdirfs"), LogPath);
-   #endif
+     if(HexChat)
+       sprintf(Buffer, "%s/logs/%s", xchat_get_info(ph, "xchatdirfs"), LogPath);
+     else
+       sprintf(Buffer, "%s/xchatlogs/%s", xchat_get_info(ph, "xchatdirfs"), LogPath);
      xchat_commandf(ph,"spark aexec %s %s\n", TextEditor, Buffer);
    }
 
@@ -3837,15 +3842,15 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
    xchat_commandf(ph,"MENU ADD \"Sparkles/Cram/Slash\" \"spark cram\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Cram/No slash\" \"spark cram noslash\"");
 
-   #ifdef HEXCHAT_PLUGIN_H
+   if(HexChat) {
      xchat_commandf(ph,"MENU ADD \"Sparkles/HexChat\"");
      xchat_commandf(ph,"MENU ADD \"Sparkles/HexChat/Disable beeps\" \"set input_filter_beep on\"");
      xchat_commandf(ph,"MENU ADD \"Sparkles/HexChat/Enable beeps\" \"set input_filter_beep off\"");
-   #else
+   } else {
      xchat_commandf(ph,"MENU ADD \"Sparkles/XChat\"");
      xchat_commandf(ph,"MENU ADD \"Sparkles/XChat/Disable beeps\" \"set input_filter_beep on\"");
      xchat_commandf(ph,"MENU ADD \"Sparkles/XChat/Enable beeps\" \"set input_filter_beep off\"");
-   #endif
+   }
 
    xchat_commandf(ph,"MENU ADD \"Sparkles/Reset tab colors\" \"spark chancolorset 0\"");
    xchat_commandf(ph,"MENU ADD \"Sparkles/Remove sayhook\" \"spark sayhook off\"");
@@ -3930,4 +3935,17 @@ int xchat_plugin_init(xchat_plugin *plugin_handle,
 
    xchat_printf(ph, "Sparkles version %s was loaded successfully \n",PVERSION);
    return 1;
+}
+
+int hexchat_plugin_init(xchat_plugin *plugin_handle, char **plugin_name, char **plugin_desc, char **plugin_version, char *arg) {
+  HexChat = 1;
+  return xchat_plugin_init(plugin_handle, plugin_name, plugin_desc, plugin_version, arg);
+}
+
+void hexchat_plugin_get_info(char **name, char **desc, char **version, void **reserved) {
+  xchat_plugin_get_info(name, desc, version, reserved);
+}
+
+int hexchat_plugin_deinit() {
+  return xchat_plugin_deinit();
 }

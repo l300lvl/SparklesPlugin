@@ -1,0 +1,46 @@
+#define XCHAT_PRI_HIGHEST HEXCHAT_PRI_HIGHEST
+#define XCHAT_PRI_HIGH HEXCHAT_PRI_HIGH
+#define XCHAT_PRI_NORM HEXCHAT_PRI_NORM
+#define XCHAT_PRI_LOW HEXCHAT_PRI_LOW
+#define XCHAT_PRI_LOWEST HEXCHAT_PRI_LOWEST
+
+#define XCHAT_EAT_NONE HEXCHAT_EAT_NONE
+#define XCHAT_EAT_XCHAT HEXCHAT_EAT_XCHAT
+#define XCHAT_EAT_PLUGIN HEXCHAT_EAT_PLUGIN
+#define XCHAT_EAT_ALL HEXCHAT_EAT_ALL
+
+#define xchat_plugin hexchat_plugin
+#define xchat_list hexchat_list
+#define xchat_hook hexchat_hook
+#define xchat_context hexchat_context
+
+#define xchat_hook_command hexchat_hook_command
+#define xchat_hook_server hexchat_hook_server
+#define xchat_hook_print hexchat_hook_print
+#define xchat_hook_timer hexchat_hook_timer
+#define xchat_hook_fd hexchat_hook_fd
+#define xchat_unhook hexchat_unhook
+#define xchat_print hexchat_print
+#define xchat_printf hexchat_printf
+#define xchat_command hexchat_command
+#define xchat_commandf hexchat_commandf
+#define xchat_nickcmp hexchat_nickcmp
+#define xchat_set_context hexchat_set_context
+#define xchat_find_context hexchat_find_context
+#define xchat_get_context hexchat_get_context
+#define xchat_get_info hexchat_get_info
+#define xchat_get_prefs hexchat_get_prefs
+#define xchat_list_get hexchat_list_get
+#define xchat_list_free hexchat_list_free
+#define xchat_list_fields hexchat_list_fields
+#define xchat_list_str hexchat_list_str
+#define xchat_list_int hexchat_list_int
+#define xchat_list_time hexchat_list_time
+#define xchat_list_next hexchat_list_next
+#define xchat_plugingui_add hexchat_plugingui_add
+#define xchat_plugingui_remove hexchat_plugingui_remove
+#define xchat_emit_print hexchat_emit_print
+#define xchat_gettext hexchat_gettext
+#define xchat_send_modes hexchat_send_modes
+#define xchat_strip hexchat_strip
+#define xchat_free hexchat_free
